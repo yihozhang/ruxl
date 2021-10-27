@@ -37,7 +37,7 @@ impl<T: 'static> Fetch<T> {
         Fetch(Box::new(|| {
             // TODO: Arc and Mutex seems unnecessary, because
             // there will only ever be two reference, and one
-            // is write, one is read
+            // is write, one is read. These two will never be concurrent.
             let status = Arc::new(Mutex::new(FetchStatus::<T>::NotFetched));
             let modifier = status.clone();
             let abs_request = move || {
