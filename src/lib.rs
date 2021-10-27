@@ -6,14 +6,40 @@ pub trait Request<T> {
     fn run(self) -> T;
 }
 
-struct AbsRequest(Box<dyn FnOnce()>);
+#[derive(Debug)]
+pub struct FnRequest<T, F: FnOnce() -> T> {
+    f: F,
+}
 
-impl AbsRequest {
-    fn run_all(reqs: Vec<AbsRequest>) {
-        todo!()
+impl<T, F: FnOnce() -> T> FnRequest<T, F> {
+    pub fn new(f: F) -> Self {
+        FnRequest { f }
     }
 }
 
+impl<T, F: FnOnce() -> T> Request<T> for FnRequest<T, F> {
+    fn run(self) -> T {
+        (self.f)()
+    }
+}
+
+struct AbsRequest(Box<dyn FnOnce() + Send>);
+
+impl AbsRequest {
+    pub fn run(self) {
+        (self.0)();
+    }
+}
+
+impl AbsRequest {
+    fn run_all(reqs: Vec<AbsRequest>) {
+        use rayon::prelude::*;
+        reqs.into_par_iter().for_each(|req| req.run());
+        // reqs.into_iter().for_each(|req| req.run());
+    }
+}
+
+#[derive(Debug)]
 enum FetchStatus<T> {
     NotFetched,
     FetchSuccess(T),
@@ -32,8 +58,8 @@ impl<T: 'static> From<ReqResult<T>> for Fetch<T> {
     }
 }
 
-impl<T: 'static> Fetch<T> {
-    pub fn new<R: Request<T> + 'static>(request: R) -> Fetch<T> {
+impl<T: 'static + Send + fmt::Debug> Fetch<T> {
+    pub fn new<R: Request<T> + 'static + Send>(request: R) -> Fetch<T> {
         Fetch(Box::new(|| {
             // TODO: Arc and Mutex seems unnecessary, because
             // there will only ever be two reference, and one
@@ -42,17 +68,20 @@ impl<T: 'static> Fetch<T> {
             let modifier = status.clone();
             let abs_request = move || {
                 let res = request.run();
-                let mut m = modifier.as_ref().lock().unwrap();
+                let mut m = modifier.lock().unwrap();
                 *m = FetchStatus::FetchSuccess(res);
             };
-            ReqResult::Blocked(vec![AbsRequest(Box::new(abs_request))], Fetch(Box::new(move || {
-                let v: &mut FetchStatus<T> = &mut status.as_ref().lock().unwrap();
-                if let FetchStatus::FetchSuccess(v) = mem::replace(v, FetchStatus::NotFetched) {
-                    ReqResult::Done(v)
-                } else {
-                    unreachable!()
-                }
-            })))
+            ReqResult::Blocked(
+                vec![AbsRequest(Box::new(abs_request))],
+                Fetch(Box::new(move || {
+                    let v: &mut FetchStatus<T> = &mut status.as_ref().lock().unwrap();
+                    if let FetchStatus::FetchSuccess(v) = mem::replace(v, FetchStatus::NotFetched) {
+                        ReqResult::Done(v)
+                    } else {
+                        unreachable!()
+                    }
+                })),
+            )
         }))
     }
 }
@@ -71,21 +100,22 @@ impl<T: 'static> Fetch<T> {
     }
 
     // TODO: make type Fetch<U, 'a> so U does not to be static
-    pub fn bind<U: 'static>(self, k: Box<dyn Fn(T) -> Fetch<U>>) -> Fetch<U> {
+    pub fn bind<U: 'static>(self, k: impl FnOnce(T) -> Fetch<U> + 'static) -> Fetch<U> {
         // let res: &ReqResult<T> = &a.0.lock().expect("bind");
-        let res: ReqResult<T> = self.get();
-        match res {
-            ReqResult::Done(a) => k(a),
-            ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.bind(k)).into(),
-        }
+        Fetch(Box::new(|| {
+            let res = self.get();
+            match res {
+                ReqResult::Done(a) => k(a).get(),
+                ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.bind(k)).into(),
+            }
+        }))
     }
 
-    pub fn fmap<U: 'static>(self, f: Box<dyn Fn(T) -> U>) -> Fetch<U> {
-        let res: ReqResult<T> = self.get();
-        match res {
-            ReqResult::Done(a) => Fetch::pure(f(a)),
+    pub fn fmap<U: 'static>(self, f: impl FnOnce(T) -> U + 'static) -> Fetch<U> {
+        Fetch(Box::new(|| match self.get() {
+            ReqResult::Done(a) => ReqResult::Done(f(a)),
             ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.fmap(f)).into(),
-        }
+        }))
     }
 
     pub fn run(self) -> T {
@@ -100,20 +130,88 @@ impl<T: 'static> Fetch<T> {
     }
 }
 
-impl<T: 'static, U: 'static> Fetch<Box<dyn Fn(T) -> U>> {
-    pub fn ap(self, x: Fetch<T>) -> Fetch<U> {
-        match (self.get(), x.get()) {
-            (ReqResult::Done(f), ReqResult::Done(x)) => ReqResult::Done(f(x)).into(),
-            (ReqResult::Done(f), ReqResult::Blocked(br, c)) => {
-                ReqResult::Blocked(br, c.fmap(f)).into()
-            }
-            (ReqResult::Blocked(br, c), ReqResult::Done(x)) => {
-                ReqResult::Blocked(br, c.ap(Fetch::pure(x))).into()
-            }
-            (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x)) => {
-                ReqResult::Blocked(vec_merge(br1, br2), f.ap(x)).into()
-            }
+pub fn ap<T, U, F>(f: Fetch<F>, x: Fetch<T>) -> Fetch<U>
+where
+    T: 'static,
+    U: 'static,
+    F: FnOnce(T) -> U + 'static,
+{
+    Fetch(Box::new(|| match (f.get(), x.get()) {
+        (ReqResult::Done(f), ReqResult::Done(x)) => ReqResult::Done(f(x)).into(),
+        (ReqResult::Done(f), ReqResult::Blocked(br, c)) => ReqResult::Blocked(br, c.fmap(f)).into(),
+        (ReqResult::Blocked(br, c), ReqResult::Done(x)) => {
+            ReqResult::Blocked(br, ap(c, Fetch::pure(x))).into()
         }
+        (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x)) => {
+            ReqResult::Blocked(vec_merge(br1, br2), ap(f, x)).into()
+        }
+    }))
+}
+
+pub fn ap2<T1, T2, U, F>(f: Fetch<F>, x: Fetch<T1>, y: Fetch<T2>) -> Fetch<U>
+where
+    T1: 'static,
+    T2: 'static,
+    U: 'static,
+    F: FnOnce(T1, T2) -> U + 'static,
+{
+    // match (f.get(), x.get(), y.get()) {
+    //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Done(y)) => {
+    //         ReqResult::Done(f(x, y)).into()
+    //     }
+    //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Blocked(br, y)) => {
+    //         ReqResult::Blocked(br, y.fmap(|y| f(x, y))).into()
+    //     }
+    //     (ReqResult::Done(f), ReqResult::Blocked(br, x), ReqResult::Done(y)) => {
+    //         ReqResult::Blocked(br, x.fmap(|x| f(x, y))).into()
+    //     }
+    //     (ReqResult::Done(f), ReqResult::Blocked(br1, x), ReqResult::Blocked(br2, y)) => {
+    //         let res = ap(x.fmap(|x| |y| f(x, y)), y);
+    //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
+    //     }
+    //     (ReqResult::Blocked(br, f), ReqResult::Done(x), ReqResult::Done(y)) => {
+    //         let res = ap2(f, Fetch::pure(x), Fetch::pure(y));
+    //         ReqResult::Blocked(br, res).into()
+    //     }
+    //     (ReqResult::Blocked(br1, f), ReqResult::Done(x), ReqResult::Blocked(br2, y)) => {
+    //         let res = ap2(f, Fetch::pure(x), y);
+    //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
+    //     }
+    //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Done(y)) => {
+    //         let res = ap2(f, x, Fetch::pure(y));
+    //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
+    //     }
+    //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Blocked(br3, y)) => {
+    //         let br = vec_merge(vec_merge(br1, br2), br3);
+    //         ReqResult::Blocked(br, ap2(f, x, y)).into()
+    //     }
+    // }
+    let f = f.fmap(|f| |x| |y| f(x, y));
+    ap(ap(f, x), y)
+}
+
+trait Traversable<T> {
+    fn sequence(self) -> Fetch<Vec<T>>;
+}
+
+fn cons_f<T: 'static>(ys: Fetch<Vec<T>>, x: Fetch<T>) -> Fetch<Vec<T>> {
+    ap(
+        ys.fmap(|mut ys| {
+            |x| {
+                ys.push(x);
+                ys
+            }
+        }),
+        x,
+    )
+}
+
+// traverse f = List.foldr cons_f (pure [])
+//       where cons_f x ys = liftA2 (:) (f x) ys
+impl<T: 'static, V: Iterator<Item = Fetch<T>> + 'static> Traversable<T> for V {
+    fn sequence(self) -> Fetch<Vec<T>> {
+        let init: Fetch<Vec<T>> = Fetch::pure(Vec::new());
+        self.fold(init, cons_f)
     }
 }
 
@@ -126,4 +224,110 @@ fn vec_merge<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    #[derive(Clone, Copy, Debug)]
+    struct PostId(usize);
+    #[derive(Debug, Clone)]
+    struct Date(String);
+    #[derive(Debug, Clone)]
+    struct PostContent(String);
+    #[derive(Debug, Clone)]
+    struct PostInfo {
+        id: PostId,
+        date: Date,
+        topic: String,
+    }
+
+    fn get_post_ids() -> Fetch<Vec<PostId>> {
+        Fetch::new(FnRequest::new(|| {
+            thread::sleep(time::Duration::from_millis(500));
+            vec![PostId(1), PostId(2)]
+        }))
+    }
+
+    fn get_post_info(id: PostId) -> Fetch<PostInfo> {
+        Fetch::new(FnRequest::new(move || {
+            thread::sleep(time::Duration::from_millis(500));
+            PostInfo {
+                id,
+                date: Date("today".to_string()),
+                topic: ["Hello", "world"][id.0 % 2].to_string(),
+            }
+        }))
+    }
+
+    fn get_post_content(id: PostId) -> Fetch<PostContent> {
+        Fetch::new(FnRequest::new(move || {
+            thread::sleep(time::Duration::from_millis(500));
+            PostContent(format!("A post with id {}", id.0))
+        }))
+    }
+
+    fn render_posts(it: impl Iterator<Item = (PostInfo, PostContent)>) -> String {
+        it.map(|(info, content)| format!("<p>{} {}</p>", info.topic, content.0))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_side_pane(posts: String) -> impl FnOnce(String) -> String {
+        move |topics| {
+            format!("<div class=\"topics\">{}</div>\n<div class=\"posts\">{}</div>", topics, posts)
+        }
+    }
+
+    fn render_page(side: String) -> impl Fn(String) -> String {
+        move |main| {
+            format!(
+                "<html><body><div>{}</div><div>{}</div></body></html>",
+                side, main
+            )
+        }
+    }
+
+    fn popular_posts() -> Fetch<String> {
+        Fetch::new(FnRequest::new(move || {
+            thread::sleep(time::Duration::from_millis(500));
+            "<p>popular post 1, popular post 2, ...</p>\n".to_string()
+        }))
+    }
+
+    fn topics() -> Fetch<String> {
+        Fetch::new(FnRequest::new(move || {
+            thread::sleep(time::Duration::from_millis(500));
+            "<p>topic 1, topic 2, ...</p>\n".to_string()
+        }))
+    }
+
+    fn left_pane() -> Fetch<String> {
+        let f = ap(Fetch::pure(render_side_pane), popular_posts());
+        ap(f, topics())
+    }
+
+    fn get_all_post_info() -> Fetch<Vec<PostInfo>> {
+        get_post_ids().bind(|ids| ids.into_iter().map(|id| get_post_info(id)).sequence())
+    }
+
+    fn main_pane() -> Fetch<String> {
+        get_all_post_info().bind(|posts| {
+            let posts2 = posts.clone();
+            posts.into_iter().map(|post| post.id).map(|id| get_post_content(id)).sequence().bind(|content| {
+                let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
+                Fetch::<String>::pure(rendered)
+            })
+        })
+    }
+
+    fn blog() -> Fetch<String> {
+        ap(ap(Fetch::pure(render_page), left_pane()), main_pane())
+    }
+
+    #[test]
+    fn run_blog() {
+        let start_time = time::Instant::now();
+        let blog = blog();
+        println!("{}", start_time.elapsed().as_millis());
+        blog.run();
+        println!("{}", start_time.elapsed().as_millis());
+    }
+}
