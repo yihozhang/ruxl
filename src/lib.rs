@@ -39,6 +39,20 @@ impl AbsRequest {
     }
 }
 
+#[derive(Clone)]
+pub enum ExceptionType {
+    Msg(String),
+    HttpError(usize),
+    OOM,
+    Timeout,
+}
+
+#[derive(Clone)]
+pub enum Exception {
+    Err(ExceptionType),
+    Nothing,
+}
+
 #[derive(Debug)]
 enum FetchStatus<T> {
     NotFetched,
@@ -48,19 +62,20 @@ enum FetchStatus<T> {
 enum ReqResult<T> {
     Done(T),
     Blocked(Vec<AbsRequest>, Fetch<T>),
+    Throw(Exception),
 }
 
-pub struct Fetch<T>(Box<dyn FnOnce() -> ReqResult<T>>);
+pub struct Fetch<T>(Box<dyn FnOnce(Exception) -> ReqResult<T>>);
 
 impl<T: 'static> From<ReqResult<T>> for Fetch<T> {
     fn from(req_res: ReqResult<T>) -> Self {
-        Fetch(Box::new(|| req_res))
+        Fetch(Box::new(|_res| req_res))
     }
 }
 
 impl<T: 'static + Send + fmt::Debug> Fetch<T> {
     pub fn new<R: Request<T> + 'static + Send>(request: R) -> Fetch<T> {
-        Fetch(Box::new(|| {
+        Fetch(Box::new(|_res| {
             // TODO: Arc and Mutex seems unnecessary, because
             // there will only ever be two reference, and one
             // is write, one is read. These two will never be concurrent.
@@ -73,7 +88,7 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
             };
             ReqResult::Blocked(
                 vec![AbsRequest(Box::new(abs_request))],
-                Fetch(Box::new(move || {
+                Fetch(Box::new(move |_res| {
                     let v: &mut FetchStatus<T> = &mut status.as_ref().lock().unwrap();
                     if let FetchStatus::FetchSuccess(v) = mem::replace(v, FetchStatus::NotFetched) {
                         ReqResult::Done(v)
@@ -86,46 +101,71 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
     }
 }
 
+pub fn throw<T: 'static>(e: Exception) -> Fetch<T> {
+    Fetch(Box::new(|_res| ReqResult::Throw(e)))
+}
+
+pub fn catch<T>(f: Fetch<T>, handler: Arc<dyn Fn(ExceptionType) -> Fetch<T>>) -> Fetch<T>
+where
+    T: 'static,
+{
+    Fetch(Box::new(|res| {
+        let r = f.get()(res.clone());
+        match r {
+            ReqResult::Done(a) => ReqResult::Done(a).into(),
+            ReqResult::Blocked(br, c) => (ReqResult::Blocked(br, catch(c, handler))).into(),
+            ReqResult::Throw(e) => match e {
+                Exception::Err(e) => handler(e).get()(res),
+                Exception::Nothing => ReqResult::Throw(e).into(),
+            },
+        }
+    }))
+}
+
 impl<T: 'static> Fetch<T> {
     pub fn pure(a: T) -> Fetch<T> {
-        Fetch(Box::new(|| ReqResult::Done(a)))
+        Fetch(Box::new(|_| ReqResult::Done(a)))
     }
 
-    pub fn pure_fn(f: impl FnOnce() -> T + 'static) -> Fetch<T> {
-        Fetch(Box::new(|| ReqResult::Done(f())))
+    pub fn pure_fn(f: impl FnOnce(Exception) -> T + 'static) -> Fetch<T> {
+        Fetch(Box::new(|x| ReqResult::Done(f(x))))
     }
 
-    fn get(self) -> ReqResult<T> {
-        (self.0)()
+    fn get(self) -> impl FnOnce(Exception) -> ReqResult<T> {
+        self.0
     }
 
     // TODO: make type Fetch<U, 'a> so U does not to be static
     pub fn bind<U: 'static>(self, k: impl FnOnce(T) -> Fetch<U> + 'static) -> Fetch<U> {
         // let res: &ReqResult<T> = &a.0.lock().expect("bind");
-        Fetch(Box::new(|| {
-            let res = self.get();
-            match res {
-                ReqResult::Done(a) => k(a).get(),
+        Fetch(Box::new(|res| {
+            let r = self.get()(res.clone());
+            match r {
+                ReqResult::Done(a) => k(a).get()(res),
                 ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.bind(k)).into(),
+                ReqResult::Throw(e) => ReqResult::Throw(e).into(),
             }
         }))
     }
 
     pub fn fmap<U: 'static>(self, f: impl FnOnce(T) -> U + 'static) -> Fetch<U> {
-        Fetch(Box::new(|| match self.get() {
+        Fetch(Box::new(|res| match self.get()(res) {
             ReqResult::Done(a) => ReqResult::Done(f(a)),
             ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.fmap(f)).into(),
+            ReqResult::Throw(e) => ReqResult::Throw(e).into(),
         }))
     }
 
-    pub fn run(self) -> T {
-        let r = self.get();
+    pub fn run(self, handler: Arc<dyn Fn(ExceptionType) -> Fetch<T>>) -> Result<T, Exception> {
+        let runner = catch(self, handler.clone());
+        let r = runner.get()(Exception::Nothing);
         match r {
-            ReqResult::Done(a) => a,
+            ReqResult::Done(a) => Ok(a),
             ReqResult::Blocked(br, c) => {
                 AbsRequest::run_all(br);
-                c.run()
+                c.run(handler)
             }
+            ReqResult::Throw(e) => Err(e),
         }
     }
 }
@@ -136,7 +176,7 @@ where
     U: 'static,
     F: FnOnce(T) -> U + 'static,
 {
-    Fetch(Box::new(|| match (f.get(), x.get()) {
+    Fetch(Box::new(|res| match (f.get()(res.clone()), x.get()(res)) {
         (ReqResult::Done(f), ReqResult::Done(x)) => ReqResult::Done(f(x)).into(),
         (ReqResult::Done(f), ReqResult::Blocked(br, c)) => ReqResult::Blocked(br, c.fmap(f)).into(),
         (ReqResult::Blocked(br, c), ReqResult::Done(x)) => {
@@ -144,6 +184,11 @@ where
         }
         (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x)) => {
             ReqResult::Blocked(vec_merge(br1, br2), ap(f, x)).into()
+        }
+        (ReqResult::Done(_g), ReqResult::Throw(e)) => ReqResult::Throw(e).into(),
+        (ReqResult::Throw(e), _) => ReqResult::Throw(e).into(),
+        (ReqResult::Blocked(br, c), ReqResult::Throw(e)) => {
+            ReqResult::Blocked(br, ap(c, throw(e))).into()
         }
     }))
 }
@@ -272,7 +317,10 @@ mod tests {
 
     fn render_side_pane(posts: String) -> impl FnOnce(String) -> String {
         move |topics| {
-            format!("<div class=\"topics\">{}</div>\n<div class=\"posts\">{}</div>", topics, posts)
+            format!(
+                "<div class=\"topics\">{}</div>\n<div class=\"posts\">{}</div>",
+                topics, posts
+            )
         }
     }
 
@@ -311,11 +359,30 @@ mod tests {
     fn main_pane() -> Fetch<String> {
         get_all_post_info().bind(|posts| {
             let posts2 = posts.clone();
-            posts.into_iter().map(|post| post.id).map(|id| get_post_content(id)).sequence().bind(|content| {
-                let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
-                Fetch::<String>::pure(rendered)
-            })
+            posts
+                .into_iter()
+                .map(|post| post.id)
+                .map(|id| get_post_content(id))
+                .sequence()
+                .bind(|content| {
+                    let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
+                    Fetch::<String>::pure(rendered)
+                })
         })
+    }
+
+    fn error_page(e: ExceptionType) -> Fetch<String> {
+        match e {
+            ExceptionType::HttpError(err_code) => {
+                Fetch::pure(format!("<h1> HttpError: {}", err_code))
+            }
+            ExceptionType::Msg(msg) => Fetch::pure(format!(
+                "An error occured ... but you received this message: {}",
+                msg
+            )),
+            ExceptionType::OOM => Fetch::pure(format!("Ooof! Out Of Memory!")),
+            ExceptionType::Timeout => Fetch::pure(format!("TvT Timeout!")),
+        }
     }
 
     fn blog() -> Fetch<String> {
@@ -327,7 +394,7 @@ mod tests {
         let start_time = time::Instant::now();
         let blog = blog();
         println!("{}", start_time.elapsed().as_millis());
-        blog.run();
+        let _result = blog.run(Arc::new(|e| error_page(e)));
         println!("{}", start_time.elapsed().as_millis());
     }
 }
