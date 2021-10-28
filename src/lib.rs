@@ -2,23 +2,25 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::*;
 
+type RequestResult<T> = Result<T, Exception>;
+
 pub trait Request<T> {
-    fn run(self) -> T;
+    fn run(self) -> RequestResult<T>;
 }
 
 #[derive(Debug)]
-pub struct FnRequest<T, F: FnOnce() -> T> {
+pub struct FnRequest<T, F: FnOnce() -> RequestResult<T>> {
     f: F,
 }
 
-impl<T, F: FnOnce() -> T> FnRequest<T, F> {
+impl<T, F: FnOnce() -> RequestResult<T>> FnRequest<T, F> {
     pub fn new(f: F) -> Self {
         FnRequest { f }
     }
 }
 
-impl<T, F: FnOnce() -> T> Request<T> for FnRequest<T, F> {
-    fn run(self) -> T {
+impl<T, F: FnOnce() -> RequestResult<T>> Request<T> for FnRequest<T, F> {
+    fn run(self) -> RequestResult<T> {
         (self.f)()
     }
 }
@@ -39,7 +41,7 @@ impl AbsRequest {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ExceptionType {
     Msg(String),
     HttpError(usize),
@@ -47,7 +49,7 @@ pub enum ExceptionType {
     Timeout,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Exception {
     Err(ExceptionType),
     Nothing,
@@ -57,6 +59,7 @@ pub enum Exception {
 enum FetchStatus<T> {
     NotFetched,
     FetchSuccess(T),
+    FetchException(Exception),
 }
 
 enum ReqResult<T> {
@@ -84,16 +87,19 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
             let abs_request = move || {
                 let res = request.run();
                 let mut m = modifier.lock().unwrap();
-                *m = FetchStatus::FetchSuccess(res);
+                match res {
+                    Ok(res) => *m = FetchStatus::FetchSuccess(res),
+                    Err(e) => *m = FetchStatus::FetchException(e),
+                }
             };
             ReqResult::Blocked(
                 vec![AbsRequest(Box::new(abs_request))],
                 Fetch(Box::new(move |_res| {
                     let v: &mut FetchStatus<T> = &mut status.as_ref().lock().unwrap();
-                    if let FetchStatus::FetchSuccess(v) = mem::replace(v, FetchStatus::NotFetched) {
-                        ReqResult::Done(v)
-                    } else {
-                        unreachable!()
+                    match mem::replace(v, FetchStatus::NotFetched) {
+                        FetchStatus::FetchSuccess(v) => ReqResult::Done(v),
+                        FetchStatus::FetchException(e) => ReqResult::Throw(e),
+                        _ => unreachable!(),
                     }
                 })),
             )
@@ -271,6 +277,7 @@ fn vec_merge<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand;
     #[derive(Clone, Copy, Debug)]
     struct PostId(usize);
     #[derive(Debug, Clone)]
@@ -287,25 +294,25 @@ mod tests {
     fn get_post_ids() -> Fetch<Vec<PostId>> {
         Fetch::new(FnRequest::new(|| {
             thread::sleep(time::Duration::from_millis(500));
-            vec![PostId(1), PostId(2)]
+            Ok(vec![PostId(1), PostId(2)])
         }))
     }
 
     fn get_post_info(id: PostId) -> Fetch<PostInfo> {
         Fetch::new(FnRequest::new(move || {
             thread::sleep(time::Duration::from_millis(500));
-            PostInfo {
+            Ok(PostInfo {
                 id,
                 date: Date("today".to_string()),
                 topic: ["Hello", "world"][id.0 % 2].to_string(),
-            }
+            })
         }))
     }
 
     fn get_post_content(id: PostId) -> Fetch<PostContent> {
         Fetch::new(FnRequest::new(move || {
             thread::sleep(time::Duration::from_millis(500));
-            PostContent(format!("A post with id {}", id.0))
+            Ok(PostContent(format!("A post with id {}", id.0)))
         }))
     }
 
@@ -336,14 +343,14 @@ mod tests {
     fn popular_posts() -> Fetch<String> {
         Fetch::new(FnRequest::new(move || {
             thread::sleep(time::Duration::from_millis(500));
-            "<p>popular post 1, popular post 2, ...</p>\n".to_string()
+            Ok("<p>popular post 1, popular post 2, ...</p>\n".to_string())
         }))
     }
 
     fn topics() -> Fetch<String> {
         Fetch::new(FnRequest::new(move || {
             thread::sleep(time::Duration::from_millis(500));
-            "<p>topic 1, topic 2, ...</p>\n".to_string()
+            Ok("<p>topic 1, topic 2, ...</p>\n".to_string())
         }))
     }
 
@@ -354,6 +361,18 @@ mod tests {
 
     fn get_all_post_info() -> Fetch<Vec<PostInfo>> {
         get_post_ids().bind(|ids| ids.into_iter().map(|id| get_post_info(id)).sequence())
+    }
+
+    fn random_crash_page() -> Fetch<String> {
+        Fetch::new(FnRequest::new(move || {
+            if !rand::random::<bool>() {
+                Err(Exception::Err(ExceptionType::Msg(
+                    "Intended error :P".to_string(),
+                )))
+            } else {
+                Ok("".to_string())
+            }
+        }))
     }
 
     fn main_pane() -> Fetch<String> {
@@ -389,6 +408,19 @@ mod tests {
         ap(ap(Fetch::pure(render_page), left_pane()), main_pane())
     }
 
+    fn blog_with_crash() -> Fetch<String> {
+        ap(
+            ap(
+                ap(
+                    Fetch::pure(|x| |y| |z| format!("{}<br>{}", z, render_page(y)(x))),
+                    left_pane(),
+                ),
+                main_pane(),
+            ),
+            random_crash_page(),
+        )
+    }
+
     #[test]
     fn run_blog() {
         let start_time = time::Instant::now();
@@ -396,5 +428,12 @@ mod tests {
         println!("{}", start_time.elapsed().as_millis());
         let _result = blog.run(Arc::new(|e| error_page(e)));
         println!("{}", start_time.elapsed().as_millis());
+    }
+    #[test]
+    fn test_random_crash() {
+        match blog_with_crash().run(Arc::new(|e| error_page(e))) {
+            Ok(result) => println!("{}", result),
+            Err(e) => println!("{:?}", e),
+        }
     }
 }
