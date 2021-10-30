@@ -68,17 +68,17 @@ enum ReqResult<T> {
     Throw(Exception),
 }
 
-pub struct Fetch<T>(Box<dyn FnOnce(Exception) -> ReqResult<T>>);
+pub struct Fetch<T>(Box<dyn FnOnce() -> ReqResult<T>>);
 
 impl<T: 'static> From<ReqResult<T>> for Fetch<T> {
     fn from(req_res: ReqResult<T>) -> Self {
-        Fetch(Box::new(|_res| req_res))
+        Fetch(Box::new(|| req_res))
     }
 }
 
 impl<T: 'static + Send + fmt::Debug> Fetch<T> {
     pub fn new<R: Request<T> + 'static + Send>(request: R) -> Fetch<T> {
-        Fetch(Box::new(|_res| {
+        Fetch(Box::new(|| {
             // TODO: Arc and Mutex seems unnecessary, because
             // there will only ever be two reference, and one
             // is write, one is read. These two will never be concurrent.
@@ -94,7 +94,7 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
             };
             ReqResult::Blocked(
                 vec![AbsRequest(Box::new(abs_request))],
-                Fetch(Box::new(move |_res| {
+                Fetch(Box::new(move || {
                     let v: &mut FetchStatus<T> = &mut status.as_ref().lock().unwrap();
                     match mem::replace(v, FetchStatus::NotFetched) {
                         FetchStatus::FetchSuccess(v) => ReqResult::Done(v),
@@ -108,20 +108,20 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
 }
 
 pub fn throw<T: 'static>(e: Exception) -> Fetch<T> {
-    Fetch(Box::new(|_res| ReqResult::Throw(e)))
+    Fetch(Box::new(|| ReqResult::Throw(e)))
 }
 
 pub fn catch<T>(f: Fetch<T>, handler: Arc<dyn Fn(ExceptionType) -> Fetch<T>>) -> Fetch<T>
 where
     T: 'static,
 {
-    Fetch(Box::new(|res| {
-        let r = f.get()(res.clone());
+    Fetch(Box::new(|| {
+        let r = f.get()();
         match r {
             ReqResult::Done(a) => ReqResult::Done(a).into(),
             ReqResult::Blocked(br, c) => (ReqResult::Blocked(br, catch(c, handler))).into(),
             ReqResult::Throw(e) => match e {
-                Exception::Err(e) => handler(e).get()(res),
+                Exception::Err(e) => handler(e).get()(),
                 Exception::Nothing => ReqResult::Throw(e).into(),
             },
         }
@@ -130,24 +130,24 @@ where
 
 impl<T: 'static> Fetch<T> {
     pub fn pure(a: T) -> Fetch<T> {
-        Fetch(Box::new(|_| ReqResult::Done(a)))
+        Fetch(Box::new(|| ReqResult::Done(a)))
     }
 
-    pub fn pure_fn(f: impl FnOnce(Exception) -> T + 'static) -> Fetch<T> {
-        Fetch(Box::new(|x| ReqResult::Done(f(x))))
+    pub fn pure_fn(f: impl FnOnce() -> T + 'static) -> Fetch<T> {
+        Fetch(Box::new(|| ReqResult::Done(f())))
     }
 
-    fn get(self) -> impl FnOnce(Exception) -> ReqResult<T> {
+    fn get(self) -> impl FnOnce() -> ReqResult<T> {
         self.0
     }
 
     // TODO: make type Fetch<U, 'a> so U does not to be static
     pub fn bind<U: 'static>(self, k: impl FnOnce(T) -> Fetch<U> + 'static) -> Fetch<U> {
         // let res: &ReqResult<T> = &a.0.lock().expect("bind");
-        Fetch(Box::new(|res| {
-            let r = self.get()(res.clone());
+        Fetch(Box::new(|| {
+            let r = self.get()();
             match r {
-                ReqResult::Done(a) => k(a).get()(res),
+                ReqResult::Done(a) => k(a).get()(),
                 ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.bind(k)).into(),
                 ReqResult::Throw(e) => ReqResult::Throw(e).into(),
             }
@@ -155,7 +155,7 @@ impl<T: 'static> Fetch<T> {
     }
 
     pub fn fmap<U: 'static>(self, f: impl FnOnce(T) -> U + 'static) -> Fetch<U> {
-        Fetch(Box::new(|res| match self.get()(res) {
+        Fetch(Box::new(|| match self.get()() {
             ReqResult::Done(a) => ReqResult::Done(f(a)),
             ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.fmap(f)).into(),
             ReqResult::Throw(e) => ReqResult::Throw(e).into(),
@@ -164,7 +164,7 @@ impl<T: 'static> Fetch<T> {
 
     pub fn run(self, handler: Arc<dyn Fn(ExceptionType) -> Fetch<T>>) -> Result<T, Exception> {
         let runner = catch(self, handler.clone());
-        let r = runner.get()(Exception::Nothing);
+        let r = runner.get()();
         match r {
             ReqResult::Done(a) => Ok(a),
             ReqResult::Blocked(br, c) => {
@@ -182,7 +182,7 @@ where
     U: 'static,
     F: FnOnce(T) -> U + 'static,
 {
-    Fetch(Box::new(|res| match (f.get()(res.clone()), x.get()(res)) {
+    Fetch(Box::new(|| match (f.get()(), x.get()()) {
         (ReqResult::Done(f), ReqResult::Done(x)) => ReqResult::Done(f(x)).into(),
         (ReqResult::Done(f), ReqResult::Blocked(br, c)) => ReqResult::Blocked(br, c.fmap(f)).into(),
         (ReqResult::Blocked(br, c), ReqResult::Done(x)) => {
