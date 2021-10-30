@@ -49,7 +49,6 @@ pub enum Exception {
     Timeout,
 }
 
-
 #[derive(Debug)]
 enum FetchStatus<T, E = Impossible> {
     NotFetched,
@@ -73,12 +72,10 @@ impl<T: 'static, E: 'static> From<ReqResult<T, E>> for Fetch<T, E> {
 
 impl<T: 'static> Fetch<T, Impossible> {
     pub fn into<E: 'static>(self) -> Fetch<T, E> {
-        Fetch(Box::new(|| {
-            match self.get()() {
-                ReqResult::Done(a) => ReqResult::Done(a),
-                ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.into()),
-                ReqResult::Throw(e) => match e {}
-            }
+        Fetch(Box::new(|| match self.get()() {
+            ReqResult::Done(a) => ReqResult::Done(a),
+            ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.into()),
+            ReqResult::Throw(e) => match e {},
         }))
     }
 }
@@ -207,10 +204,11 @@ where
 macro_rules! ap_builder {
     ($func:ident; $F:ident; $U:ident; $($T:ident),+; $f:ident; $($x:ident),+) => {
         pub fn $func<
+            E:'static,
             $($T:'static),+,
             U:'static,
             F:FnOnce($($T),+) -> $U + 'static
-        >($f: crate::Fetch<$F>, $($x:crate::Fetch<$T>),+) -> crate::Fetch<$U> {
+        >($f: crate::Fetch<$F,E>, $($x:crate::Fetch<$T,E>),+) -> crate::Fetch<$U,E> {
             ap_builder!(@fmap $f, $($x),+);
             ap_builder!(@ap $f; $($x),+)
         }
@@ -401,9 +399,7 @@ mod tests {
     fn random_crash_page() -> Fetch<String, Exception> {
         Fetch::new(FnRequest::new(move || {
             if !rand::random::<bool>() {
-                Err(Exception::Msg(
-                    "Intended error :P".to_string(),
-                ))
+                Err(Exception::Msg("Intended error :P".to_string()))
             } else {
                 Ok("".to_string())
             }
@@ -427,9 +423,7 @@ mod tests {
 
     fn error_page(e: Exception) -> Fetch<String> {
         match e {
-            Exception::HttpError(err_code) => {
-                Fetch::pure(format!("<h1> HttpError: {}", err_code))
-            }
+            Exception::HttpError(err_code) => Fetch::pure(format!("<h1> HttpError: {}", err_code)),
             Exception::Msg(msg) => Fetch::pure(format!(
                 "An error occured ... but you received this message: {}",
                 msg
@@ -471,7 +465,7 @@ mod tests {
         let blog_with_crash = catch(blog_with_crash(), error_page);
         match blog_with_crash.run() {
             Ok(result) => println!("{}", result),
-            Err(e) => match e {}
+            Err(e) => match e {},
         }
     }
 }
