@@ -164,11 +164,7 @@ impl<T: 'static> Fetch<T> {
     }
 
     pub fn run(self) -> Result<T, Exception>
-// where
-    //     F: Fn(ExceptionType) -> Fetch<T> + 'static,
     {
-        // let runner = catch(self, handler);
-        // let r = runner.get()();
         match self.get()() {
             ReqResult::Done(a) => Ok(a),
             ReqResult::Blocked(br, c) => {
@@ -209,11 +205,8 @@ macro_rules! ap_builder {
             U:'static,
             F:FnOnce($($T),+) -> $U + 'static
         >($f: crate::Fetch<$F>, $($x:crate::Fetch<$T>),+) -> crate::Fetch<$U> {
-        // >() -> crate::Fetch<$U> {
             ap_builder!(@fmap $f, $($x),+);
             ap_builder!(@ap $f; $($x),+)
-            // let f = f.fmap(|f| |x| |y| f(x, y));
-            // ap(ap(f, x), y)
         }
     };
     (@fmap $f:ident, $($x:ident),+) => {
@@ -296,8 +289,6 @@ fn cons_f<T: 'static>(ys: Fetch<Vec<T>>, x: Fetch<T>) -> Fetch<Vec<T>> {
     )
 }
 
-// traverse f = List.foldr cons_f (pure [])
-//       where cons_f x ys = liftA2 (:) (f x) ys
 impl<T: 'static, V: Iterator<Item = Fetch<T>> + 'static> Traversable<T> for V {
     fn sequence(self) -> Fetch<Vec<T>> {
         let init: Fetch<Vec<T>> = Fetch::pure(Vec::new());
