@@ -1,7 +1,7 @@
 #[macro_export]
 macro_rules! fetch {
   // return
-  (return $r:expr ;) => {
+  (return $r:expr $(;)?) => {
     $crate::Fetch::pure($r)
   };
 
@@ -32,25 +32,3 @@ macro_rules! fetch {
   }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[derive(Clone, Copy, Debug)]
-    struct PostId(usize);
-    #[derive(Debug, Clone)]
-    struct Date(String);
-    #[derive(Debug, Clone)]
-    struct PostContent(String);
-    #[derive(Debug, Clone)]
-    struct PostInfo {
-        id: PostId,
-        date: Date,
-        topic: String,
-    }
-
-    fn get_post_ids() -> Fetch<Vec<PostId>> {
-        fetch! {
-            
-        }
-    }
-}

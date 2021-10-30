@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::*;
 
+mod monad;
+
 pub trait Request<T, E = Impossible> {
     fn run(self) -> Result<T, E>;
 }
@@ -39,14 +41,6 @@ impl AbsRequest {
         reqs.into_par_iter().for_each(|req| req.run());
         // reqs.into_iter().for_each(|req| req.run());
     }
-}
-
-#[derive(Clone, Debug)]
-pub enum Exception {
-    Msg(String),
-    HttpError(usize),
-    OutOfMemory,
-    Timeout,
 }
 
 #[derive(Debug)]
@@ -201,102 +195,78 @@ where
 }
 
 #[allow(unused_macros)]
-macro_rules! ap_builder {
+macro_rules! lift_builder {
     ($func:ident; $F:ident; $U:ident; $($T:ident),+; $f:ident; $($x:ident),+) => {
         pub fn $func<
             E:'static,
             $($T:'static),+,
             U:'static,
             F:FnOnce($($T),+) -> $U + 'static
-        >($f: crate::Fetch<$F,E>, $($x:crate::Fetch<$T,E>),+) -> crate::Fetch<$U,E> {
-            ap_builder!(@fmap $f, $($x),+);
-            ap_builder!(@ap $f; $($x),+)
+        >($f: $F, $($x:crate::Fetch<$T,E>),+) -> crate::Fetch<$U,E> {
+            let $f = crate::Fetch::pure($f);
+            lift_builder!(@fmap $f, $($x),+);
+            lift_builder!(@ap $f; $($x),+)
         }
     };
     (@fmap $f:ident, $($x:ident),+) => {
-        let $f = $f.fmap(|$f| ap_builder!(@fmap_lambda $($x),+; $f, $($x),+));
+        let $f = $f.fmap(|$f| lift_builder!(@fmap_lambda $($x),+; $f, $($x),+));
     };
     (@fmap_lambda $x:ident; $f:ident, $($args:ident),+) => {
         |$x| $f($($args),+)
     };
     (@fmap_lambda $x:ident, $($xs:ident),*; $($args:ident),+) => {
-        |$x| ap_builder!(@fmap_lambda $($xs),*; $($args),+)
+        |$x| lift_builder!(@fmap_lambda $($xs),*; $($args),+)
     };
     (@ap $f:expr; $x:ident, $($xs:ident),*) => {
-        ap_builder!(@ap crate::ap($f, $x); $($xs),*)
+        lift_builder!(@ap crate::ap($f, $x); $($xs),*)
     };
     (@ap $f:expr; $x:ident) => {
         crate::ap($f, $x)
     };
 }
 
-ap_builder!(ap2; F; U; T1, T2; f; x1, x2);
-ap_builder!(ap3; F; U; T1, T2, T3; f; x1, x2, x3);
-ap_builder!(ap4; F; U; T1, T2, T3, T4; f; x1, x2, x3, x4);
-ap_builder!(ap5; F; U; T1, T2, T3, T4, T5; f; x1, x2, x3, x4, x5);
-
-// pub fn ap2<T1, T2, U, F>(f: Fetch<F>, x: Fetch<T1>, y: Fetch<T2>) -> Fetch<U>
-// where
-//     T1: 'static,
-//     T2: 'static,
-//     U: 'static,
-//     F: FnOnce(T1, T2) -> U + 'static,
-// {
-//     // match (f.get(), x.get(), y.get()) {
-//     //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Done(y)) => {
-//     //         ReqResult::Done(f(x, y)).into()
-//     //     }
-//     //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Blocked(br, y)) => {
-//     //         ReqResult::Blocked(br, y.fmap(|y| f(x, y))).into()
-//     //     }
-//     //     (ReqResult::Done(f), ReqResult::Blocked(br, x), ReqResult::Done(y)) => {
-//     //         ReqResult::Blocked(br, x.fmap(|x| f(x, y))).into()
-//     //     }
-//     //     (ReqResult::Done(f), ReqResult::Blocked(br1, x), ReqResult::Blocked(br2, y)) => {
-//     //         let res = ap(x.fmap(|x| |y| f(x, y)), y);
-//     //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
-//     //     }
-//     //     (ReqResult::Blocked(br, f), ReqResult::Done(x), ReqResult::Done(y)) => {
-//     //         let res = ap2(f, Fetch::pure(x), Fetch::pure(y));
-//     //         ReqResult::Blocked(br, res).into()
-//     //     }
-//     //     (ReqResult::Blocked(br1, f), ReqResult::Done(x), ReqResult::Blocked(br2, y)) => {
-//     //         let res = ap2(f, Fetch::pure(x), y);
-//     //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
-//     //     }
-//     //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Done(y)) => {
-//     //         let res = ap2(f, x, Fetch::pure(y));
-//     //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
-//     //     }
-//     //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Blocked(br3, y)) => {
-//     //         let br = vec_merge(vec_merge(br1, br2), br3);
-//     //         ReqResult::Blocked(br, ap2(f, x, y)).into()
-//     //     }
-//     // }
-//     let f = f.fmap(|f| |x| |y| f(x, y));
-//     ap(ap(f, x), y)
-// }
-
-trait Traversable<T, E> {
-    fn sequence(self) -> Fetch<Vec<T>, E>;
-}
+lift_builder!(lift2; F; U; T1, T2; f; x1, x2);
+lift_builder!(lift3; F; U; T1, T2, T3; f; x1, x2, x3);
+lift_builder!(lift4; F; U; T1, T2, T3, T4; f; x1, x2, x3, x4);
+lift_builder!(lift5; F; U; T1, T2, T3, T4, T5; f; x1, x2, x3, x4, x5);
 
 fn cons_f<T: 'static, E: 'static>(ys: Fetch<Vec<T>, E>, x: Fetch<T, E>) -> Fetch<Vec<T>, E> {
-    ap(
-        ys.fmap(|mut ys| {
-            |x| {
-                ys.push(x);
-                ys
-            }
-        }),
+    lift2(
+        |mut ys: Vec<T>, x| {
+            ys.push(x);
+            ys
+        },
+        ys,
         x,
     )
 }
 
-impl<T: 'static, E: 'static, V: Iterator<Item = Fetch<T, E>> + 'static> Traversable<T, E> for V {
-    fn sequence(self) -> Fetch<Vec<T>, E> {
+trait Traversable<T> {
+    fn traverse<T2: 'static, E: 'static>(
+        self,
+        f: impl Fn(T) -> Fetch<T2, E> + 'static,
+    ) -> Fetch<Vec<T2>, E>;
+}
+
+impl<T, I: Iterator<Item = T>> Traversable<T> for I {
+    fn traverse<T2: 'static, E: 'static>(
+        self,
+        f: impl Fn(T) -> Fetch<T2, E> + 'static,
+    ) -> Fetch<Vec<T2>, E> {
         let init = Fetch::pure(Vec::new());
-        self.fold(init, cons_f)
+        self.fold(init, |ys, x| cons_f(ys, f(x)))
+    }
+}
+
+trait Sequence<T, E> {
+    fn sequence(self) -> Fetch<Vec<T>, E>;
+}
+
+impl<T: 'static, E: 'static, V: Iterator<Item = Fetch<T, E>> + 'static> Sequence<T, E> for V {
+    fn sequence(self) -> Fetch<Vec<T>, E> {
+        // let init = Fetch::pure(Vec::new());
+        // self.fold(init, cons_f)
+        self.traverse(|x| x)
     }
 }
 
@@ -310,6 +280,11 @@ fn vec_merge<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
 
 #[cfg(test)]
 mod tests {
+    #[derive(Clone, Debug)]
+    pub enum Exception {
+        Msg(String),
+    }
+
     use super::*;
     #[derive(Clone, Copy, Debug)]
     struct PostId(usize);
@@ -355,22 +330,18 @@ mod tests {
             .join("\n")
     }
 
-    fn render_side_pane(posts: String) -> impl FnOnce(String) -> String {
-        move |topics| {
-            format!(
-                "<div class=\"topics\">{}</div>\n<div class=\"posts\">{}</div>",
-                topics, posts
-            )
-        }
+    fn render_side_pane(posts: String, topics: String) -> String {
+        format!(
+            "<div class=\"topics\">{}</div>\n<div class=\"posts\">{}</div>",
+            topics, posts
+        )
     }
 
-    fn render_page(side: String) -> impl Fn(String) -> String {
-        move |main| {
-            format!(
-                "<html><body><div>{}</div><div>{}</div></body></html>",
-                side, main
-            )
-        }
+    fn render_page(side: String, main: String) -> String {
+        format!(
+            "<html><body><div>{}</div><div>{}</div></body></html>",
+            side, main
+        )
     }
 
     fn popular_posts() -> Fetch<String> {
@@ -388,12 +359,14 @@ mod tests {
     }
 
     fn left_pane() -> Fetch<String> {
-        let f = ap(Fetch::pure(render_side_pane), popular_posts());
-        ap(f, topics())
+        lift2(render_side_pane, popular_posts(), topics())
     }
 
     fn get_all_post_info() -> Fetch<Vec<PostInfo>> {
-        get_post_ids().bind(|ids| ids.into_iter().map(get_post_info).sequence())
+        fetch! {
+            ids <- get_post_ids();
+            ids.into_iter().traverse(get_post_info)
+        }
     }
 
     fn random_crash_page() -> Fetch<String, Exception> {
@@ -407,45 +380,48 @@ mod tests {
     }
 
     fn main_pane() -> Fetch<String> {
-        get_all_post_info().bind(|posts| {
+        // get_all_post_info().bind(|posts| {
+        //     let posts2 = posts.clone();
+        //     posts
+        //         .into_iter()
+        //         .map(|post| post.id)
+        //         .map(get_post_content)
+        //         .sequence()
+        //         .bind(|content| {
+        //             let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
+        //             Fetch::<String>::pure(rendered)
+        //         })
+        // })
+        fetch! {
+            posts <- get_all_post_info();
             let posts2 = posts.clone();
-            posts
-                .into_iter()
-                .map(|post| post.id)
-                .map(get_post_content)
-                .sequence()
-                .bind(|content| {
-                    let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
-                    Fetch::<String>::pure(rendered)
-                })
-        })
+            content <- posts.into_iter().traverse(|post| get_post_content(post.id));
+            let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
+            return rendered
+        }
     }
 
     fn error_page(e: Exception) -> Fetch<String> {
         match e {
-            Exception::HttpError(err_code) => Fetch::pure(format!("<h1> HttpError: {}", err_code)),
+            // Exception::HttpError(err_code) => Fetch::pure(format!("<h1> HttpError: {}", err_code)),
             Exception::Msg(msg) => Fetch::pure(format!(
                 "An error occured ... but you received this message: {}",
                 msg
             )),
-            Exception::OutOfMemory => Fetch::pure("Ooof! Out Of Memory!".into()),
-            Exception::Timeout => Fetch::pure("TvT Timeout!".into()),
+            // Exception::OutOfMemory => Fetch::pure("Ooof! Out Of Memory!".into()),
+            // Exception::Timeout => Fetch::pure("TvT Timeout!".into()),
         }
     }
 
     fn blog() -> Fetch<String> {
-        ap(ap(Fetch::pure(render_page), left_pane()), main_pane())
+        lift2(render_page, left_pane(), main_pane())
     }
 
     fn blog_with_crash() -> Fetch<String, Exception> {
-        ap(
-            ap(
-                ap(
-                    Fetch::pure(|x| |y| |z| format!("{}<br>{}", z, render_page(y)(x))),
-                    left_pane().into(),
-                ),
-                main_pane().into(),
-            ),
+        lift3(
+            |x, y, z| format!("{}<br>{}", z, render_page(y, x)),
+            left_pane().into(),
+            main_pane().into(),
             random_crash_page(),
         )
     }
