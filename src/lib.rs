@@ -45,7 +45,7 @@ impl AbsRequest {
 pub enum ExceptionType {
     Msg(String),
     HttpError(usize),
-    OOM,
+    OutOfMemory,
     Timeout,
 }
 
@@ -111,18 +111,19 @@ pub fn throw<T: 'static>(e: Exception) -> Fetch<T> {
     Fetch(Box::new(|| ReqResult::Throw(e)))
 }
 
-pub fn catch<T>(f: Fetch<T>, handler: Arc<dyn Fn(ExceptionType) -> Fetch<T>>) -> Fetch<T>
+pub fn catch<T, F>(f: Fetch<T>, handler: F) -> Fetch<T>
 where
     T: 'static,
+    F: Fn(ExceptionType) -> Fetch<T> + 'static,
 {
     Fetch(Box::new(|| {
         let r = f.get()();
         match r {
-            ReqResult::Done(a) => ReqResult::Done(a).into(),
-            ReqResult::Blocked(br, c) => (ReqResult::Blocked(br, catch(c, handler))).into(),
+            ReqResult::Done(a) => ReqResult::Done(a),
+            ReqResult::Blocked(br, c) => (ReqResult::Blocked(br, catch(c, handler))),
             ReqResult::Throw(e) => match e {
                 Exception::Err(e) => handler(e).get()(),
-                Exception::Nothing => ReqResult::Throw(e).into(),
+                Exception::Nothing => ReqResult::Throw(e),
             },
         }
     }))
@@ -148,8 +149,8 @@ impl<T: 'static> Fetch<T> {
             let r = self.get()();
             match r {
                 ReqResult::Done(a) => k(a).get()(),
-                ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.bind(k)).into(),
-                ReqResult::Throw(e) => ReqResult::Throw(e).into(),
+                ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.bind(k)),
+                ReqResult::Throw(e) => ReqResult::Throw(e),
             }
         }))
     }
@@ -157,19 +158,22 @@ impl<T: 'static> Fetch<T> {
     pub fn fmap<U: 'static>(self, f: impl FnOnce(T) -> U + 'static) -> Fetch<U> {
         Fetch(Box::new(|| match self.get()() {
             ReqResult::Done(a) => ReqResult::Done(f(a)),
-            ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.fmap(f)).into(),
-            ReqResult::Throw(e) => ReqResult::Throw(e).into(),
+            ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.fmap(f)),
+            ReqResult::Throw(e) => ReqResult::Throw(e),
         }))
     }
 
-    pub fn run(self, handler: Arc<dyn Fn(ExceptionType) -> Fetch<T>>) -> Result<T, Exception> {
-        let runner = catch(self, handler.clone());
-        let r = runner.get()();
-        match r {
+    pub fn run(self) -> Result<T, Exception>
+// where
+    //     F: Fn(ExceptionType) -> Fetch<T> + 'static,
+    {
+        // let runner = catch(self, handler);
+        // let r = runner.get()();
+        match self.get()() {
             ReqResult::Done(a) => Ok(a),
             ReqResult::Blocked(br, c) => {
                 AbsRequest::run_all(br);
-                c.run(handler)
+                c.run()
             }
             ReqResult::Throw(e) => Err(e),
         }
@@ -183,63 +187,98 @@ where
     F: FnOnce(T) -> U + 'static,
 {
     Fetch(Box::new(|| match (f.get()(), x.get()()) {
-        (ReqResult::Done(f), ReqResult::Done(x)) => ReqResult::Done(f(x)).into(),
-        (ReqResult::Done(f), ReqResult::Blocked(br, c)) => ReqResult::Blocked(br, c.fmap(f)).into(),
+        (ReqResult::Done(f), ReqResult::Done(x)) => ReqResult::Done(f(x)),
+        (ReqResult::Done(f), ReqResult::Blocked(br, c)) => ReqResult::Blocked(br, c.fmap(f)),
         (ReqResult::Blocked(br, c), ReqResult::Done(x)) => {
-            ReqResult::Blocked(br, ap(c, Fetch::pure(x))).into()
+            ReqResult::Blocked(br, ap(c, Fetch::pure(x)))
         }
         (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x)) => {
-            ReqResult::Blocked(vec_merge(br1, br2), ap(f, x)).into()
+            ReqResult::Blocked(vec_merge(br1, br2), ap(f, x))
         }
-        (ReqResult::Done(_g), ReqResult::Throw(e)) => ReqResult::Throw(e).into(),
-        (ReqResult::Throw(e), _) => ReqResult::Throw(e).into(),
-        (ReqResult::Blocked(br, c), ReqResult::Throw(e)) => {
-            ReqResult::Blocked(br, ap(c, throw(e))).into()
-        }
+        (ReqResult::Done(_g), ReqResult::Throw(e)) => ReqResult::Throw(e),
+        (ReqResult::Throw(e), _) => ReqResult::Throw(e),
+        (ReqResult::Blocked(br, c), ReqResult::Throw(e)) => ReqResult::Blocked(br, ap(c, throw(e))),
     }))
 }
 
-pub fn ap2<T1, T2, U, F>(f: Fetch<F>, x: Fetch<T1>, y: Fetch<T2>) -> Fetch<U>
-where
-    T1: 'static,
-    T2: 'static,
-    U: 'static,
-    F: FnOnce(T1, T2) -> U + 'static,
-{
-    // match (f.get(), x.get(), y.get()) {
-    //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Done(y)) => {
-    //         ReqResult::Done(f(x, y)).into()
-    //     }
-    //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Blocked(br, y)) => {
-    //         ReqResult::Blocked(br, y.fmap(|y| f(x, y))).into()
-    //     }
-    //     (ReqResult::Done(f), ReqResult::Blocked(br, x), ReqResult::Done(y)) => {
-    //         ReqResult::Blocked(br, x.fmap(|x| f(x, y))).into()
-    //     }
-    //     (ReqResult::Done(f), ReqResult::Blocked(br1, x), ReqResult::Blocked(br2, y)) => {
-    //         let res = ap(x.fmap(|x| |y| f(x, y)), y);
-    //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
-    //     }
-    //     (ReqResult::Blocked(br, f), ReqResult::Done(x), ReqResult::Done(y)) => {
-    //         let res = ap2(f, Fetch::pure(x), Fetch::pure(y));
-    //         ReqResult::Blocked(br, res).into()
-    //     }
-    //     (ReqResult::Blocked(br1, f), ReqResult::Done(x), ReqResult::Blocked(br2, y)) => {
-    //         let res = ap2(f, Fetch::pure(x), y);
-    //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
-    //     }
-    //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Done(y)) => {
-    //         let res = ap2(f, x, Fetch::pure(y));
-    //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
-    //     }
-    //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Blocked(br3, y)) => {
-    //         let br = vec_merge(vec_merge(br1, br2), br3);
-    //         ReqResult::Blocked(br, ap2(f, x, y)).into()
-    //     }
-    // }
-    let f = f.fmap(|f| |x| |y| f(x, y));
-    ap(ap(f, x), y)
+#[allow(unused_macros)]
+macro_rules! ap_builder {
+    ($func:ident; $F:ident; $U:ident; $($T:ident),+; $f:ident; $($x:ident),+) => {
+        pub fn $func<
+            $($T:'static),+,
+            U:'static,
+            F:FnOnce($($T),+) -> $U + 'static
+        >($f: crate::Fetch<$F>, $($x:crate::Fetch<$T>),+) -> crate::Fetch<$U> {
+        // >() -> crate::Fetch<$U> {
+            ap_builder!(@fmap $f, $($x),+);
+            ap_builder!(@ap $f; $($x),+)
+            // let f = f.fmap(|f| |x| |y| f(x, y));
+            // ap(ap(f, x), y)
+        }
+    };
+    (@fmap $f:ident, $($x:ident),+) => {
+        let $f = $f.fmap(|$f| ap_builder!(@fmap_lambda $($x),+; $f, $($x),+));
+    };
+    (@fmap_lambda $x:ident; $f:ident, $($args:ident),+) => {
+        |$x| $f($($args),+)
+    };
+    (@fmap_lambda $x:ident, $($xs:ident),*; $($args:ident),+) => {
+        |$x| ap_builder!(@fmap_lambda $($xs),*; $($args),+)
+    };
+    (@ap $f:expr; $x:ident, $($xs:ident),*) => {
+        ap_builder!(@ap crate::ap($f, $x); $($xs),*)
+    };
+    (@ap $f:expr; $x:ident) => {
+        crate::ap($f, $x)
+    };
 }
+
+ap_builder!(ap2; F; U; T1, T2; f; x1, x2);
+ap_builder!(ap3; F; U; T1, T2, T3; f; x1, x2, x3);
+ap_builder!(ap4; F; U; T1, T2, T3, T4; f; x1, x2, x3, x4);
+ap_builder!(ap5; F; U; T1, T2, T3, T4, T5; f; x1, x2, x3, x4, x5);
+
+// pub fn ap2<T1, T2, U, F>(f: Fetch<F>, x: Fetch<T1>, y: Fetch<T2>) -> Fetch<U>
+// where
+//     T1: 'static,
+//     T2: 'static,
+//     U: 'static,
+//     F: FnOnce(T1, T2) -> U + 'static,
+// {
+//     // match (f.get(), x.get(), y.get()) {
+//     //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Done(y)) => {
+//     //         ReqResult::Done(f(x, y)).into()
+//     //     }
+//     //     (ReqResult::Done(f), ReqResult::Done(x), ReqResult::Blocked(br, y)) => {
+//     //         ReqResult::Blocked(br, y.fmap(|y| f(x, y))).into()
+//     //     }
+//     //     (ReqResult::Done(f), ReqResult::Blocked(br, x), ReqResult::Done(y)) => {
+//     //         ReqResult::Blocked(br, x.fmap(|x| f(x, y))).into()
+//     //     }
+//     //     (ReqResult::Done(f), ReqResult::Blocked(br1, x), ReqResult::Blocked(br2, y)) => {
+//     //         let res = ap(x.fmap(|x| |y| f(x, y)), y);
+//     //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
+//     //     }
+//     //     (ReqResult::Blocked(br, f), ReqResult::Done(x), ReqResult::Done(y)) => {
+//     //         let res = ap2(f, Fetch::pure(x), Fetch::pure(y));
+//     //         ReqResult::Blocked(br, res).into()
+//     //     }
+//     //     (ReqResult::Blocked(br1, f), ReqResult::Done(x), ReqResult::Blocked(br2, y)) => {
+//     //         let res = ap2(f, Fetch::pure(x), y);
+//     //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
+//     //     }
+//     //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Done(y)) => {
+//     //         let res = ap2(f, x, Fetch::pure(y));
+//     //         ReqResult::Blocked(vec_merge(br1, br2), res).into()
+//     //     }
+//     //     (ReqResult::Blocked(br1, f), ReqResult::Blocked(br2, x), ReqResult::Blocked(br3, y)) => {
+//     //         let br = vec_merge(vec_merge(br1, br2), br3);
+//     //         ReqResult::Blocked(br, ap2(f, x, y)).into()
+//     //     }
+//     // }
+//     let f = f.fmap(|f| |x| |y| f(x, y));
+//     ap(ap(f, x), y)
+// }
 
 trait Traversable<T> {
     fn sequence(self) -> Fetch<Vec<T>>;
@@ -277,7 +316,6 @@ fn vec_merge<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand;
     #[derive(Clone, Copy, Debug)]
     struct PostId(usize);
     #[derive(Debug, Clone)]
@@ -360,7 +398,7 @@ mod tests {
     }
 
     fn get_all_post_info() -> Fetch<Vec<PostInfo>> {
-        get_post_ids().bind(|ids| ids.into_iter().map(|id| get_post_info(id)).sequence())
+        get_post_ids().bind(|ids| ids.into_iter().map(get_post_info).sequence())
     }
 
     fn random_crash_page() -> Fetch<String> {
@@ -381,7 +419,7 @@ mod tests {
             posts
                 .into_iter()
                 .map(|post| post.id)
-                .map(|id| get_post_content(id))
+                .map(get_post_content)
                 .sequence()
                 .bind(|content| {
                     let rendered = render_posts(posts2.into_iter().zip(content.into_iter()));
@@ -399,8 +437,8 @@ mod tests {
                 "An error occured ... but you received this message: {}",
                 msg
             )),
-            ExceptionType::OOM => Fetch::pure(format!("Ooof! Out Of Memory!")),
-            ExceptionType::Timeout => Fetch::pure(format!("TvT Timeout!")),
+            ExceptionType::OutOfMemory => Fetch::pure("Ooof! Out Of Memory!".into()),
+            ExceptionType::Timeout => Fetch::pure("TvT Timeout!".into()),
         }
     }
 
@@ -425,13 +463,16 @@ mod tests {
     fn run_blog() {
         let start_time = time::Instant::now();
         let blog = blog();
+        let blog = catch(blog, error_page);
         println!("{}", start_time.elapsed().as_millis());
-        let _result = blog.run(Arc::new(|e| error_page(e)));
+
+        let _result = blog.run();
         println!("{}", start_time.elapsed().as_millis());
     }
     #[test]
     fn test_random_crash() {
-        match blog_with_crash().run(Arc::new(|e| error_page(e))) {
+        let blog_with_crash = catch(blog_with_crash(), error_page);
+        match blog_with_crash.run() {
             Ok(result) => println!("{}", result),
             Err(e) => println!("{:?}", e),
         }
