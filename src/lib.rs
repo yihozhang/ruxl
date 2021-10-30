@@ -2,25 +2,25 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::*;
 
-type RequestResult<T> = Result<T, Exception>;
-
-pub trait Request<T> {
-    fn run(self) -> RequestResult<T>;
+pub trait Request<T, E = Impossible> {
+    fn run(self) -> Result<T, E>;
 }
 
 #[derive(Debug)]
-pub struct FnRequest<T, F: FnOnce() -> RequestResult<T>> {
+pub struct FnRequest<T, F: FnOnce() -> Result<T, E>, E = Impossible> {
     f: F,
 }
 
-impl<T, F: FnOnce() -> RequestResult<T>> FnRequest<T, F> {
+pub enum Impossible {}
+
+impl<T, F: FnOnce() -> Result<T, E>, E> FnRequest<T, F, E> {
     pub fn new(f: F) -> Self {
         FnRequest { f }
     }
 }
 
-impl<T, F: FnOnce() -> RequestResult<T>> Request<T> for FnRequest<T, F> {
-    fn run(self) -> RequestResult<T> {
+impl<T, F: FnOnce() -> Result<T, E>, E> Request<T, E> for FnRequest<T, F, E> {
+    fn run(self) -> Result<T, E> {
         (self.f)()
     }
 }
@@ -42,47 +42,54 @@ impl AbsRequest {
 }
 
 #[derive(Clone, Debug)]
-pub enum ExceptionType {
+pub enum Exception {
     Msg(String),
     HttpError(usize),
     OutOfMemory,
     Timeout,
 }
 
-#[derive(Clone, Debug)]
-pub enum Exception {
-    Err(ExceptionType),
-    Nothing,
-}
 
 #[derive(Debug)]
-enum FetchStatus<T> {
+enum FetchStatus<T, E = Impossible> {
     NotFetched,
     FetchSuccess(T),
-    FetchException(Exception),
+    FetchException(E),
 }
 
-enum ReqResult<T> {
+enum ReqResult<T, E> {
     Done(T),
-    Blocked(Vec<AbsRequest>, Fetch<T>),
-    Throw(Exception),
+    Blocked(Vec<AbsRequest>, Fetch<T, E>),
+    Throw(E),
 }
 
-pub struct Fetch<T>(Box<dyn FnOnce() -> ReqResult<T>>);
+pub struct Fetch<T, E = Impossible>(Box<dyn FnOnce() -> ReqResult<T, E>>);
 
-impl<T: 'static> From<ReqResult<T>> for Fetch<T> {
-    fn from(req_res: ReqResult<T>) -> Self {
+impl<T: 'static, E: 'static> From<ReqResult<T, E>> for Fetch<T, E> {
+    fn from(req_res: ReqResult<T, E>) -> Self {
         Fetch(Box::new(|| req_res))
     }
 }
 
-impl<T: 'static + Send + fmt::Debug> Fetch<T> {
-    pub fn new<R: Request<T> + 'static + Send>(request: R) -> Fetch<T> {
+impl<T: 'static> Fetch<T, Impossible> {
+    pub fn into<E: 'static>(self) -> Fetch<T, E> {
+        Fetch(Box::new(|| {
+            match self.get()() {
+                ReqResult::Done(a) => ReqResult::Done(a),
+                ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.into()),
+                ReqResult::Throw(e) => match e {}
+            }
+        }))
+    }
+}
+
+impl<T: 'static + Send + fmt::Debug, E: Send + 'static> Fetch<T, E> {
+    pub fn new<R: Request<T, E> + 'static + Send>(request: R) -> Fetch<T, E> {
         Fetch(Box::new(|| {
             // TODO: Arc and Mutex seems unnecessary, because
             // there will only ever be two reference, and one
             // is write, one is read. These two will never be concurrent.
-            let status = Arc::new(Mutex::new(FetchStatus::<T>::NotFetched));
+            let status = Arc::new(Mutex::new(FetchStatus::<T, E>::NotFetched));
             let modifier = status.clone();
             let abs_request = move || {
                 let res = request.run();
@@ -95,7 +102,7 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
             ReqResult::Blocked(
                 vec![AbsRequest(Box::new(abs_request))],
                 Fetch(Box::new(move || {
-                    let v: &mut FetchStatus<T> = &mut status.as_ref().lock().unwrap();
+                    let v: &mut FetchStatus<T, E> = &mut status.as_ref().lock().unwrap();
                     match mem::replace(v, FetchStatus::NotFetched) {
                         FetchStatus::FetchSuccess(v) => ReqResult::Done(v),
                         FetchStatus::FetchException(e) => ReqResult::Throw(e),
@@ -107,43 +114,42 @@ impl<T: 'static + Send + fmt::Debug> Fetch<T> {
     }
 }
 
-pub fn throw<T: 'static>(e: Exception) -> Fetch<T> {
+pub fn throw<T: 'static, E: 'static>(e: E) -> Fetch<T, E> {
     Fetch(Box::new(|| ReqResult::Throw(e)))
 }
 
-pub fn catch<T, F>(f: Fetch<T>, handler: F) -> Fetch<T>
+pub fn catch<T, F, E1, E2>(f: Fetch<T, E1>, handler: F) -> Fetch<T, E2>
 where
     T: 'static,
-    F: Fn(ExceptionType) -> Fetch<T> + 'static,
+    E1: 'static,
+    E2: 'static,
+    F: Fn(E1) -> Fetch<T, E2> + 'static,
 {
     Fetch(Box::new(|| {
         let r = f.get()();
         match r {
             ReqResult::Done(a) => ReqResult::Done(a),
-            ReqResult::Blocked(br, c) => (ReqResult::Blocked(br, catch(c, handler))),
-            ReqResult::Throw(e) => match e {
-                Exception::Err(e) => handler(e).get()(),
-                Exception::Nothing => ReqResult::Throw(e),
-            },
+            ReqResult::Blocked(br, c) => ReqResult::Blocked(br, catch(c, handler)),
+            ReqResult::Throw(e) => handler(e).get()(),
         }
     }))
 }
 
-impl<T: 'static> Fetch<T> {
-    pub fn pure(a: T) -> Fetch<T> {
+impl<T: 'static, E: 'static> Fetch<T, E> {
+    pub fn pure(a: T) -> Fetch<T, E> {
         Fetch(Box::new(|| ReqResult::Done(a)))
     }
 
-    pub fn pure_fn(f: impl FnOnce() -> T + 'static) -> Fetch<T> {
+    pub fn pure_fn(f: impl FnOnce() -> T + 'static) -> Fetch<T, E> {
         Fetch(Box::new(|| ReqResult::Done(f())))
     }
 
-    fn get(self) -> impl FnOnce() -> ReqResult<T> {
+    fn get(self) -> impl FnOnce() -> ReqResult<T, E> {
         self.0
     }
 
     // TODO: make type Fetch<U, 'a> so U does not to be static
-    pub fn bind<U: 'static>(self, k: impl FnOnce(T) -> Fetch<U> + 'static) -> Fetch<U> {
+    pub fn bind<U: 'static>(self, k: impl FnOnce(T) -> Fetch<U, E> + 'static) -> Fetch<U, E> {
         // let res: &ReqResult<T> = &a.0.lock().expect("bind");
         Fetch(Box::new(|| {
             let r = self.get()();
@@ -155,7 +161,7 @@ impl<T: 'static> Fetch<T> {
         }))
     }
 
-    pub fn fmap<U: 'static>(self, f: impl FnOnce(T) -> U + 'static) -> Fetch<U> {
+    pub fn fmap<U: 'static>(self, f: impl FnOnce(T) -> U + 'static) -> Fetch<U, E> {
         Fetch(Box::new(|| match self.get()() {
             ReqResult::Done(a) => ReqResult::Done(f(a)),
             ReqResult::Blocked(br, c) => ReqResult::Blocked(br, c.fmap(f)),
@@ -163,8 +169,7 @@ impl<T: 'static> Fetch<T> {
         }))
     }
 
-    pub fn run(self) -> Result<T, Exception>
-    {
+    pub fn run(self) -> Result<T, E> {
         match self.get()() {
             ReqResult::Done(a) => Ok(a),
             ReqResult::Blocked(br, c) => {
@@ -176,9 +181,10 @@ impl<T: 'static> Fetch<T> {
     }
 }
 
-pub fn ap<T, U, F>(f: Fetch<F>, x: Fetch<T>) -> Fetch<U>
+pub fn ap<T, U, F, E>(f: Fetch<F, E>, x: Fetch<T, E>) -> Fetch<U, E>
 where
     T: 'static,
+    E: 'static,
     U: 'static,
     F: FnOnce(T) -> U + 'static,
 {
@@ -273,11 +279,11 @@ ap_builder!(ap5; F; U; T1, T2, T3, T4, T5; f; x1, x2, x3, x4, x5);
 //     ap(ap(f, x), y)
 // }
 
-trait Traversable<T> {
-    fn sequence(self) -> Fetch<Vec<T>>;
+trait Traversable<T, E> {
+    fn sequence(self) -> Fetch<Vec<T>, E>;
 }
 
-fn cons_f<T: 'static>(ys: Fetch<Vec<T>>, x: Fetch<T>) -> Fetch<Vec<T>> {
+fn cons_f<T: 'static, E: 'static>(ys: Fetch<Vec<T>, E>, x: Fetch<T, E>) -> Fetch<Vec<T>, E> {
     ap(
         ys.fmap(|mut ys| {
             |x| {
@@ -289,9 +295,9 @@ fn cons_f<T: 'static>(ys: Fetch<Vec<T>>, x: Fetch<T>) -> Fetch<Vec<T>> {
     )
 }
 
-impl<T: 'static, V: Iterator<Item = Fetch<T>> + 'static> Traversable<T> for V {
-    fn sequence(self) -> Fetch<Vec<T>> {
-        let init: Fetch<Vec<T>> = Fetch::pure(Vec::new());
+impl<T: 'static, E: 'static, V: Iterator<Item = Fetch<T, E>> + 'static> Traversable<T, E> for V {
+    fn sequence(self) -> Fetch<Vec<T>, E> {
+        let init = Fetch::pure(Vec::new());
         self.fold(init, cons_f)
     }
 }
@@ -338,7 +344,7 @@ mod tests {
         }))
     }
 
-    fn get_post_content(id: PostId) -> Fetch<PostContent> {
+    fn get_post_content(id: PostId) -> Fetch<PostContent, Impossible> {
         Fetch::new(FnRequest::new(move || {
             thread::sleep(time::Duration::from_millis(500));
             Ok(PostContent(format!("A post with id {}", id.0)))
@@ -392,12 +398,12 @@ mod tests {
         get_post_ids().bind(|ids| ids.into_iter().map(get_post_info).sequence())
     }
 
-    fn random_crash_page() -> Fetch<String> {
+    fn random_crash_page() -> Fetch<String, Exception> {
         Fetch::new(FnRequest::new(move || {
             if !rand::random::<bool>() {
-                Err(Exception::Err(ExceptionType::Msg(
+                Err(Exception::Msg(
                     "Intended error :P".to_string(),
-                )))
+                ))
             } else {
                 Ok("".to_string())
             }
@@ -419,17 +425,17 @@ mod tests {
         })
     }
 
-    fn error_page(e: ExceptionType) -> Fetch<String> {
+    fn error_page(e: Exception) -> Fetch<String> {
         match e {
-            ExceptionType::HttpError(err_code) => {
+            Exception::HttpError(err_code) => {
                 Fetch::pure(format!("<h1> HttpError: {}", err_code))
             }
-            ExceptionType::Msg(msg) => Fetch::pure(format!(
+            Exception::Msg(msg) => Fetch::pure(format!(
                 "An error occured ... but you received this message: {}",
                 msg
             )),
-            ExceptionType::OutOfMemory => Fetch::pure("Ooof! Out Of Memory!".into()),
-            ExceptionType::Timeout => Fetch::pure("TvT Timeout!".into()),
+            Exception::OutOfMemory => Fetch::pure("Ooof! Out Of Memory!".into()),
+            Exception::Timeout => Fetch::pure("TvT Timeout!".into()),
         }
     }
 
@@ -437,14 +443,14 @@ mod tests {
         ap(ap(Fetch::pure(render_page), left_pane()), main_pane())
     }
 
-    fn blog_with_crash() -> Fetch<String> {
+    fn blog_with_crash() -> Fetch<String, Exception> {
         ap(
             ap(
                 ap(
                     Fetch::pure(|x| |y| |z| format!("{}<br>{}", z, render_page(y)(x))),
-                    left_pane(),
+                    left_pane().into(),
                 ),
-                main_pane(),
+                main_pane().into(),
             ),
             random_crash_page(),
         )
@@ -454,7 +460,7 @@ mod tests {
     fn run_blog() {
         let start_time = time::Instant::now();
         let blog = blog();
-        let blog = catch(blog, error_page);
+        let blog = blog;
         println!("{}", start_time.elapsed().as_millis());
 
         let _result = blog.run();
@@ -465,7 +471,7 @@ mod tests {
         let blog_with_crash = catch(blog_with_crash(), error_page);
         match blog_with_crash.run() {
             Ok(result) => println!("{}", result),
-            Err(e) => println!("{:?}", e),
+            Err(e) => match e {}
         }
     }
 }
