@@ -31,4 +31,3 @@ macro_rules! fetch {
     $a
   }
 }
-

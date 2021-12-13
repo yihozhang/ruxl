@@ -1,7 +1,7 @@
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::*;
-use std::hash::Hash;
 
 mod monad;
 
@@ -11,8 +11,7 @@ pub trait Request<T, E = Impossible>: Hash + Clone + Eq {
 
 pub enum Impossible {}
 
-struct 
-AbsRequest(Box<dyn FnOnce() + Send>);
+struct AbsRequest(Box<dyn FnOnce() + Send>);
 
 impl AbsRequest {
     pub fn run(self) {
@@ -270,7 +269,7 @@ mod tests {
         Msg(String),
     }
 
-    use std::{time::Duration, hash::Hasher};
+    use std::time::Duration;
 
     use super::*;
     #[derive(Clone, Copy, Debug)]
@@ -309,8 +308,7 @@ mod tests {
         }
     }
 
-    impl<T> Eq for SleepRequest<T> {
-    }
+    impl<T> Eq for SleepRequest<T> {}
 
     impl<T: Clone> Request<T> for SleepRequest<T> {
         fn run(self) -> Result<T, Impossible> {
@@ -335,7 +333,7 @@ mod tests {
                 id,
                 date: Date("today".to_string()),
                 topic: ["Hello", "world"][id.0 % 2].to_string(),
-            }
+            },
         })
     }
 
@@ -343,7 +341,7 @@ mod tests {
         Fetch::new(SleepRequest {
             name: "get_post_content",
             sleep_duration: 500,
-            result: PostContent(format!("A post with id {}", id.0))
+            result: PostContent(format!("A post with id {}", id.0)),
         })
     }
 
