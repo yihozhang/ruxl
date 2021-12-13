@@ -1,33 +1,18 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::*;
+use std::hash::Hash;
 
 mod monad;
 
-pub trait Request<T, E = Impossible> {
+pub trait Request<T, E = Impossible>: Hash + Clone + Eq {
     fn run(self) -> Result<T, E>;
-}
-
-#[derive(Debug)]
-pub struct FnRequest<T, F: FnOnce() -> Result<T, E>, E = Impossible> {
-    f: F,
 }
 
 pub enum Impossible {}
 
-impl<T, F: FnOnce() -> Result<T, E>, E> FnRequest<T, F, E> {
-    pub fn new(f: F) -> Self {
-        FnRequest { f }
-    }
-}
-
-impl<T, F: FnOnce() -> Result<T, E>, E> Request<T, E> for FnRequest<T, F, E> {
-    fn run(self) -> Result<T, E> {
-        (self.f)()
-    }
-}
-
-struct AbsRequest(Box<dyn FnOnce() + Send>);
+struct 
+AbsRequest(Box<dyn FnOnce() + Send>);
 
 impl AbsRequest {
     pub fn run(self) {
@@ -280,10 +265,12 @@ fn vec_merge<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
 
 #[cfg(test)]
 mod tests {
-    #[derive(Clone, Debug)]
+    #[derive(Hash, PartialEq, Eq, Clone, Debug)]
     pub enum Exception {
         Msg(String),
     }
+
+    use std::{time::Duration, hash::Hasher};
 
     use super::*;
     #[derive(Clone, Copy, Debug)]
@@ -299,29 +286,65 @@ mod tests {
         topic: String,
     }
 
+    #[derive(Clone)]
+    struct SleepRequest<T> {
+        name: &'static str,
+        sleep_duration: u64,
+        result: T,
+    }
+
+    // we use name for eq and hash here, only for demonstrating purpose
+    // a real request will not have result stored in it.
+    // Then we will be able to derive Hash and Eq directly
+
+    impl<T> Hash for SleepRequest<T> {
+        fn hash<H: hash::Hasher>(&self, state: &mut H) {
+            self.name.hash(state)
+        }
+    }
+
+    impl<T> PartialEq for SleepRequest<T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.name.eq(other.name)
+        }
+    }
+
+    impl<T> Eq for SleepRequest<T> {
+    }
+
+    impl<T: Clone> Request<T> for SleepRequest<T> {
+        fn run(self) -> Result<T, Impossible> {
+            thread::sleep(Duration::from_millis(self.sleep_duration));
+            Ok(self.result)
+        }
+    }
+
     fn get_post_ids() -> Fetch<Vec<PostId>> {
-        Fetch::new(FnRequest::new(|| {
-            thread::sleep(time::Duration::from_millis(500));
-            Ok(vec![PostId(1), PostId(2)])
-        }))
+        Fetch::new(SleepRequest {
+            name: "get_post_ids",
+            sleep_duration: 500,
+            result: vec![PostId(1), PostId(2)],
+        })
     }
 
     fn get_post_info(id: PostId) -> Fetch<PostInfo> {
-        Fetch::new(FnRequest::new(move || {
-            thread::sleep(time::Duration::from_millis(500));
-            Ok(PostInfo {
+        Fetch::new(SleepRequest {
+            name: "get_post_info",
+            sleep_duration: 500,
+            result: PostInfo {
                 id,
                 date: Date("today".to_string()),
                 topic: ["Hello", "world"][id.0 % 2].to_string(),
-            })
-        }))
+            }
+        })
     }
 
     fn get_post_content(id: PostId) -> Fetch<PostContent, Impossible> {
-        Fetch::new(FnRequest::new(move || {
-            thread::sleep(time::Duration::from_millis(500));
-            Ok(PostContent(format!("A post with id {}", id.0)))
-        }))
+        Fetch::new(SleepRequest {
+            name: "get_post_content",
+            sleep_duration: 500,
+            result: PostContent(format!("A post with id {}", id.0))
+        })
     }
 
     fn render_posts(it: impl Iterator<Item = (PostInfo, PostContent)>) -> String {
@@ -345,17 +368,19 @@ mod tests {
     }
 
     fn popular_posts() -> Fetch<String> {
-        Fetch::new(FnRequest::new(move || {
-            thread::sleep(time::Duration::from_millis(500));
-            Ok("<p>popular post 1, popular post 2, ...</p>\n".to_string())
-        }))
+        Fetch::new(SleepRequest {
+            name: "popular_posts",
+            sleep_duration: 500,
+            result: "<p>popular post 1, popular post 2, ...</p>\n".to_string(),
+        })
     }
 
     fn topics() -> Fetch<String> {
-        Fetch::new(FnRequest::new(move || {
-            thread::sleep(time::Duration::from_millis(500));
-            Ok("<p>topic 1, topic 2, ...</p>\n".to_string())
-        }))
+        Fetch::new(SleepRequest {
+            name: "topics",
+            sleep_duration: 500,
+            result: "<p>topic 1, topic 2, ...</p>\n".to_string(),
+        })
     }
 
     fn left_pane() -> Fetch<String> {
@@ -369,14 +394,31 @@ mod tests {
         }
     }
 
-    fn random_crash_page() -> Fetch<String, Exception> {
-        Fetch::new(FnRequest::new(move || {
+    #[derive(Hash, Clone, PartialEq, Eq)]
+    struct RandomCrashRequest<T, E> {
+        err: E,
+        result: T,
+    }
+
+    impl<T, E> Request<T, E> for RandomCrashRequest<T, E>
+    where
+        T: Hash + Eq + Clone,
+        E: Hash + Eq + Clone,
+    {
+        fn run(self) -> Result<T, E> {
             if !rand::random::<bool>() {
-                Err(Exception::Msg("Intended error :P".to_string()))
+                Err(self.err)
             } else {
-                Ok("".to_string())
+                Ok(self.result)
             }
-        }))
+        }
+    }
+
+    fn random_crash_page() -> Fetch<String, Exception> {
+        Fetch::new(RandomCrashRequest {
+            err: Exception::Msg("Intended error :P".to_string()),
+            result: "".to_string(),
+        })
     }
 
     fn main_pane() -> Fetch<String> {
