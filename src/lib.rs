@@ -1,21 +1,76 @@
+use std::any::Any;
+use std::any::TypeId;
 use std::hash::Hash;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::*;
 
 mod monad;
 
-pub trait Request<T, E = Impossible>: Hash + Clone + Eq {
-    fn run(self) -> Result<T, E>;
+pub trait Request<T, E = Impossible> {
+    fn run(&self) -> Result<T, E>;
 }
 
 pub enum Impossible {}
 
-struct AbsRequest(Box<dyn FnOnce() + Send>);
+struct AbsRequest {
+    type_id: TypeId,
+    req: Arc<Box<()>>,
+    eq_func: Box<dyn Fn(Box<()>) -> bool + Send>,
+    hash_func: Box<dyn Fn(Box<()>) + Send>,
+    run_func: Box<dyn FnOnce() -> Box<()> + Send>,
+}
+
+impl Drop for AbsRequest {
+    fn drop(&mut self) {
+        
+    }
+}
+
+// this doesn't work, do not use
+unsafe fn any_cast<T1, T2>(ptr: Box<T1>) -> Box<T2> {
+    let raw_ptr = Box::into_raw(ptr);
+    Box::from_raw(raw_ptr.cast())
+}
 
 impl AbsRequest {
-    pub fn run(self) {
-        (self.0)();
+    pub fn run(self) -> Box<()> {
+        (self.run_func)()
+    }
+
+    pub unsafe fn new<T, E, R>(req: R) -> Self
+    where
+        T: 'static,
+        E: 'static,
+        R: Request<T, E> + Send + 'static,
+    {
+        let ptr: Box<()> = any_cast(Box::new(req));
+        let req_ref = Arc::new(ptr);
+
+        AbsRequest {
+            type_id: req.type_id(),
+            req: req_ref,
+            eq_func: Box::new(|other| req_ref.as_ref().eq(any_cast(other))),
+            hash_func: Box::new(|haser| req_ref.hash(haser.as_mut())),
+            run_func: Box::new(|| Box::new(req_ref.run()))
+        }
+    }
+}
+
+impl Hash for AbsRequest {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.hash_func)(Box::new(state))
+    }
+}
+
+impl PartialEq for AbsRequest {
+    fn eq(&self, other: &Self) -> bool {
+        if other.type_id == self.type_id {
+            (self.eq_func)(other.req.as_ref())
+        } else {
+            false
+        }
     }
 }
 
