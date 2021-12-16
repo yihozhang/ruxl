@@ -94,9 +94,10 @@ Our testing workload is fetching one latest user page of a random user, while lo
 
 # Future Work
 #### Applicative Do.
-Presentely, though ASoul simplifies the concurrency construct, we are leveraging hardcoded macros to batch the requests, which still requires manual effort. Applicative Do of Haskell is a syntactic indirection that constructs 
+Presentely, though ASoul simplifies the concurrency construct, we are leveraging hardcoded macros to batch the requests, which still requires manual effort. To address this issue, we would extend `fetch!` macro to an applicative do. Applicative Do is a syntactic indirection provided by Haskell that enables programmers write straight line code while constructing concurrency-aware program by keeping a record of monadic binds and lifting them automatically into a batched request. This feature could be expressed leveraging the meta-programming facilities of Rust macro. 
 
 #### Caching
+In Haxl paper, the authors implemented a cache store for requests, but we did not implement it due to the time constraint. 
 
 # Reference
 
