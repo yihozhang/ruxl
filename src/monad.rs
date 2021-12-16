@@ -1,4 +1,19 @@
 #[macro_export]
+macro_rules! lift {
+  ($f:expr, $a:expr, $b:expr) => {
+    lift2($f, $a, $b)
+  };
+
+  ($f:expr, $a:expr, $b:expr, $c:expr) => {
+    lift3($f, $a, $b, $c)
+  };
+  
+  ($f:expr, $a:expr, $b:expr, $c:expr, $d:expr) => {
+    lift4($f, $a, $b, $c, $d)
+  };  
+}
+
+#[macro_export]
 macro_rules! fetch {
   (app {$a:ident <- $ma:expr; $b:ident <- $mb:expr; $c:ident <- $mc:expr; $d:ident <- $md:expr }; $($cont:tt)*) => {
     lift4(move |$a, $b, $c, $d| fetch!($($cont)*), $ma, $mb, $mc, $md).bind(|a| a)

@@ -93,11 +93,14 @@ Presentely, though ASoul simplifies the concurrency construct, we are leveraging
 
 # Reference
 
-<!-- \newpage -->
+\newpage
 
-<!-- # Appendix
+# Appendix
 ## Macros and Interfaces
 #### `fetch!`
 Similar to `do` notation in Haskell, `fetch!` simplifies the monadic construction of `Fetch<T>`. The core is `<-`, an infix operator that takes a variable `x` and a `Fetch<T>` and `bind` the data of type `T` wrapped in `Fetch` to `x`, which could be used in future `bind`s.
 
-#### `` -->
+#### `sequence`
+`sequence` use an `Iterator` of type `Fetch<T, E>` to construct a `Fetch<Vec<T>, E>`, by folding the iterator and lifting each `Fetch` inside it. 
+
+#### ``
