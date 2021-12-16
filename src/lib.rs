@@ -58,11 +58,11 @@ impl<T: 'static> Fetch<T, Impossible> {
     }
 }
 
-impl<T: 'static, E: 'static> Into<Fetch<T, E>> for Result<T, E> {
-    fn into(self) -> Fetch<T, E> {
-        match self {
+impl<T: 'static, E: 'static> From<Result<T, E>> for Fetch<T, E> {
+    fn from(res: Result<T, E>) -> Self {
+        match res {
             Ok(res) => Fetch::pure(res),
-            Err(e) => throw(e),
+            Err(e) => throw(e)
         }
     }
 }
