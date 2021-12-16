@@ -225,7 +225,7 @@ fn cons_f<T: 'static, E: 'static>(ys: Fetch<Vec<T>, E>, x: Fetch<T, E>) -> Fetch
     )
 }
 
-trait Traversable<T> {
+pub trait Traversable<T> {
     fn traverse<T2: 'static, E: 'static>(
         self,
         f: impl Fn(T) -> Fetch<T2, E> + 'static,
@@ -242,7 +242,7 @@ impl<T, I: Iterator<Item = T>> Traversable<T> for I {
     }
 }
 
-trait Sequence<T, E> {
+pub trait Sequence<T, E> {
     fn sequence(self) -> Fetch<Vec<T>, E>;
 }
 
@@ -260,6 +260,18 @@ fn vec_merge<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
     }
     a.append(&mut b);
     a
+}
+
+pub fn while_m<T: 'static>(mut f: impl FnMut() -> Fetch<bool, T> + 'static) -> Fetch<(), T> {
+    fetch! {
+        let fetch_b = f();
+        b <- fetch_b;
+        if b {
+            while_m(f)
+        } else {
+            Fetch::pure(())
+        }
+    }
 }
 
 #[cfg(test)]
