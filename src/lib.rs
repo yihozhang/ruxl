@@ -58,6 +58,15 @@ impl<T: 'static> Fetch<T, Impossible> {
     }
 }
 
+impl<T: 'static, E: 'static> Into<Fetch<T, E>> for Result<T, E> {
+    fn into(self) -> Fetch<T, E> {
+        match self {
+            Ok(res) => Fetch::pure(res),
+            Err(e) => throw(e),
+        }
+    }
+}
+
 impl<T: 'static + Send + fmt::Debug, E: Send + 'static> Fetch<T, E> {
     pub fn new<R: Request<T, E> + 'static + Send>(request: R) -> Fetch<T, E> {
         Fetch(Box::new(|| {
