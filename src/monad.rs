@@ -11,6 +11,12 @@ macro_rules! fetch {
     fetch!($($r)*)
   }};
 
+  // let-mut-binding
+  (let mut $p:pat = $e:expr ; $($r:tt)*) => {{
+    let mut $p = $e;
+    fetch!($($r)*)
+  }};
+
   // const-bind
   (_ <- $x:expr ; $($r:tt)*) => {
     $x.bind(move |_| { fetch!($($r)*) })
@@ -23,12 +29,11 @@ macro_rules! fetch {
 
   // const-bind
   ($e:expr ; $($a:tt)*) => {
-    $e.bind(move |_| m!($($a)*))
+    $e.bind(move |_| fetch!($($a)*))
   };
 
   // pure
-  ($a:expr) => {
+  ($a:expr ) => {
     $a
   }
 }
-
