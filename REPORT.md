@@ -85,12 +85,22 @@ We also implemented exceptions as in the Haxl paper, which can be used for error
 # Evaluation
 We evaluate ASoul with the load generator from Lab 3 and compare the latency caused by X. We also compared the beauty between implementation in ASoul and Rust's `futures` library\footnote{Code fragments are listed in the Appendix}. Our evaluation shows that the efficiency of concurrent programs in ASoul is comparable, even better, than using the `async` and `await` constructs. 
 
-#### Setup
+#### Setup.
 We started a 16-thread Chirp kv-store from lab 3 with a pre-populated timed local storage. The storage was made using `mk_local_storage` with 200 users, 40 followers per user, 20 posts per user, 200 message length, and 123432 as the seed. 
 
 Since Chirp lab does not have an async RPC implementation, we had to implement our own using `remote::make_request` and `async_op::send`. 
 
-Our testing workload is fetching one latest user page of a random user, while logged in as another random user. 
+#### Workload.
+
+Our testing workload is fetching one latest user page of a random user, while logged in as another random user, without caching. We repeated the run 100 times for the original fetch in lab 3 (without caching), the async implementation, and the Asoul implementation. 
+
+#### Results.
+
+Original fetching took 414 milliseconds on average; async implementation took 26 milliseconds; Asoul implementation took 23 milliseconds. 
+
+Since the original fetching is single-threaded, the async and asoul implementations are order-of-magnitude faster than it. Our implementation slightly outruns the async one. We suspect that the async executor has more overhead. 
+
+For more detailed results, see Appdendix. 
 
 # Future Work
 #### Applicative Do.
@@ -113,3 +123,11 @@ Similar to `do` notation in Haskell, `fetch!` simplifies the monadic constructio
 
 #### `lift`
 Similar to `join` in async programming, `lift` combines two `Fetch` with the same error type, and output a `Fetch` that runs them concurrently. 
+
+## Evaluation Results
+| Run   | x~    | p50     | p90     | p95     | p99     |
+| ----- | ----- | ------- | ------- | ------- | ------- |
+| Original | 414.0 | 433.3 | 434.9  | 435.3   | 437.1   |
+| Async | 25.6  | 25.5    | 25.9    | 26.0    | 34.3    |
+| Asoul | 22.8  | 22.7    | 23.1    | 23.4    | 32.3    |
+
