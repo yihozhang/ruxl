@@ -1,5 +1,12 @@
 #[macro_export]
+// macro_rules! app {
+// }
+#[macro_export]
 macro_rules! fetch {
+  (app {$a:ident <- $ma:expr; $b:ident <- $mb:expr; $c:ident <- $mc:expr; $d:ident <- $md:expr }; $($cont:tt)*) => {
+    lift4(move |$a, $b, $c, $d| fetch!($($cont)*), $ma, $mb, $mc, $md).bind(|a| a)
+  };
+
   // return
   (return $r:expr $(;)?) => {
     $crate::Fetch::pure($r)
@@ -23,6 +30,10 @@ macro_rules! fetch {
   };
 
   // bind
+  (($binding:pat) <- $x:expr ; $($r:tt)*) => {
+    $x.bind(move |$binding| { fetch!($($r)*) })
+  };
+
   ($binding:ident <- $x:expr ; $($r:tt)*) => {
     $x.bind(move |$binding| { fetch!($($r)*) })
   };
@@ -35,5 +46,5 @@ macro_rules! fetch {
   // pure
   ($a:expr ) => {
     $a
-  }
+  };
 }
