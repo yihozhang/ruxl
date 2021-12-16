@@ -1,5 +1,5 @@
 ---
-title: ASoul&#58; Applicatives, Monads, and a Future for Rust
+title: "ASoul: Applicatives, Monads, and a Future for Rust"
 author:
 - Mike He
 - Jiuru Li
@@ -11,12 +11,13 @@ classoption: twocolumn
 ...
 
 # Background
-
-Concurrency is now ubiquitous in today's network programming. In a typical scenario, an application makes requests to remote servers and the program logic will depend on the collected responses. However, the traditional sequential execution model will waste CPU time by waiting for the responses. Therefore, concurrency is introduced to make sure the part of programs not dependent on the server responses can make progress and maximize execution efficiency. Maximizing concurrency without burdens on the developers is still an interesting programming language design problem.
-
+<!-- Concurrency is now ubiquitous in today's network programming. In a typical scenario, an application makes requests to remote servers and the program logic will depend on the collected responses. However, the traditional sequential execution model will waste CPU time by waiting for the responses. Therefore, concurrency is introduced to make sure the part of programs not dependent on the server responses can make progress and maximize execution efficiency. Maximizing concurrency without burdens on the developers is still an interesting programming language design problem. -->
 Async is a concurrent programming model adopted in Rust and has now been widely used. To use the async model, developers create an encapsulated async block, called future, for each remote data fetch, and let an executor run many futures concurrently. Compared to the multi-processing or multi-threading concurrency model, async does not bear system call overheads and is more lightweight and more efficient. However, there are several problems with the async programming model, potentially preventing it from further adoption compared to multi-threading. For example, API calls need to be asynchronous in order to be run concurrently. Moreover, the executor can only run multiple futures together when they are explicitly used as parameters to specific future calls such as `join!` or `select!`.
 
-In this project, we propose an alternative concurrency model for Rust based on Haxl, a concurrency framework developed by Facebook. Our programming model allows mixing asynchronous and synchronous calls in the same program and schedule concurrent tasks automatically without explicit calls to future APIs like `join!` or `select!`. At the core of our programming model is applicative functors, or applicatives, and monads. In fact, monads have been long known in the functional programming community for being able to express concurrency, and the async model in Rust can be seen as syntactic sugars around the concurrency monad. However, following Haxl, we propose to use applicative functors to express tasks that do not has dependencies and can be executed concurrently. The use of applicatives allows us to batch independent tasks via standard applicative operations like `bind` and `ap`. However, this will require the user to manually call these applicative operations, causing mental burdens. The async model in Rust eases this problem by adding new syntactic constructs like `await` and `async`, which is not practical for us. Therefore, we propose to use Rust's macro mechanism to mitigate the syntactic indirections as much as possible.
+Haxl is a concurrency framework developed by Facebook that proposes to use applicatives and monads to write concurrency-aware program with out directly expressing the (in)dependencies. Taking advantages of Haskell's type system, Haxl is able to automatically batch requests together whenever they could be executed in parallel. 
+
+In this project, we propose ASoul\footnote{\textbf{AS}ync \textbf{O}ptimal, \textbf{U}ser-friendly \textbf{L}ibrary.}, an alternative concurrency model for Rust based on Haxl. Our programming model allows mixing asynchronous and synchronous calls in the same program and schedule concurrent tasks automatically without explicit calls to future APIs like `join!` or `select!`. At the core of our programming model is applicative functors, or applicatives, and monads. In fact, monads have been long known in the functional programming community for being able to express concurrency, and the async model in Rust can be seen as syntactic sugars around the concurrency monad. Following Haxl, we propose to use applicative functors to express tasks that do not has dependencies and can be executed concurrently. The use of applicatives allows us to batch independent tasks via standard applicative operations like `bind` and `ap`. We implement a `fetch!` macro as a syntactic indirection that reduce the complication introduced by calling applicative operations. 
+<!-- However, this will require the user to manually call these applicative operations, causing mental burdens. The async model in Rust eases this problem by adding new syntactic constructs like `await` and `async`, which is not practical for us. Therefore, we propose to use Rust's macro mechanism to mitigate the syntactic indirections as much as possible. -->
 
 # Design of ASoul
 
@@ -62,7 +63,7 @@ It turns out these are all we need to express all the features we want: sequenti
 
 An acute reader may notice that all monads are applicatives, and applicatives can be automatically implemented using operations on monads, so why do we even call them out? We do this, following Haxl, because of the restrictions specific to applicatives. In this case, compositions of applicatives are known to be parallelizable, so a more efficient implementation can be derived.
 
-#### Batching requests into layers
+#### Batching requests into layers.
 
 Now we have abstractions for expressing sequential and concurrent programs, but we still need a way to perform these requests that utilizes the dependency information to maximize concurrency. We use the following:
 
@@ -77,6 +78,26 @@ Now we have abstractions for expressing sequential and concurrent programs, but 
 
 Although our design follows Haxl, which is implemented in Haskell, we need to adapt the design to features compatible in Rust. In particular, since we don't need the typeclass definition of structures but only one specific instance of monad and applicative, we simply implement them as structs and traits with applicative-like and monadic-like interfaces. Moreover, programming in Haxl or Ruxl requires a monadic programming style, which Haskell has nice supports of and otherwise will be very tedious, so we also implement a `fetch!` macros over Ruxl for easier programming.
 
-### Other features
+#### Other features.
 
 We also implemented exceptions as in the Haxl paper, which can be used for error handling, e.g., when the fetched data are inconsistent or a network error happens. Our design also allows a very modular executor. Currently, we implemented the concurrent execution using the parallel iterator library provided by rayon, which internally uses a thread pool.
+
+# Evaluation
+We evaluate ASoul with the load generator from Lab 3 and compare the latency caused by X. We also compared the beauty between implementation in ASoul and Rust's `futures` library\footnote{Code fragments are listed in the Appendix}. Our evaluation shows that the efficiency of concurrent programs in ASoul is comparable, even better, than using the `async` and `await` constructs. 
+
+# Future Work
+#### Applicative Do.
+Presentely, though ASoul simplifies the concurrency construct, we are leveraging hardcoded macros to batch the requests, which still requires manual effort. Applicative Do of Haskell is a syntactic indirection that constructs 
+
+#### Caching
+
+# Reference
+
+<!-- \newpage -->
+
+<!-- # Appendix
+## Macros and Interfaces
+#### `fetch!`
+Similar to `do` notation in Haskell, `fetch!` simplifies the monadic construction of `Fetch<T>`. The core is `<-`, an infix operator that takes a variable `x` and a `Fetch<T>` and `bind` the data of type `T` wrapped in `Fetch` to `x`, which could be used in future `bind`s.
+
+#### `` -->
