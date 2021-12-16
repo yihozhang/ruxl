@@ -85,6 +85,13 @@ We also implemented exceptions as in the Haxl paper, which can be used for error
 # Evaluation
 We evaluate ASoul with the load generator from Lab 3 and compare the latency caused by X. We also compared the beauty between implementation in ASoul and Rust's `futures` library\footnote{Code fragments are listed in the Appendix}. Our evaluation shows that the efficiency of concurrent programs in ASoul is comparable, even better, than using the `async` and `await` constructs. 
 
+#### Setup
+We started a 16-thread Chirp kv-store from lab 3 with a pre-populated timed local storage. The storage was made using `mk_local_storage` with 200 users, 40 followers per user, 20 posts per user, 200 message length, and 123432 as the seed. 
+
+Since Chirp lab does not have an async RPC implementation, we had to implement our own using `remote::make_request` and `async_op::send`. 
+
+Our testing workload is fetching one latest user page of a random user, while logged in as another random user. 
+
 # Future Work
 #### Applicative Do.
 Presentely, though ASoul simplifies the concurrency construct, we are leveraging hardcoded macros to batch the requests, which still requires manual effort. Applicative Do of Haskell is a syntactic indirection that constructs 
@@ -103,4 +110,5 @@ Similar to `do` notation in Haskell, `fetch!` simplifies the monadic constructio
 #### `sequence`
 `sequence` use an `Iterator` of type `Fetch<T, E>` to construct a `Fetch<Vec<T>, E>`, by folding the iterator and lifting each `Fetch` inside it. 
 
-#### ``
+#### `lift`
+Similar to `join` in async programming, `lift` combines two `Fetch` with the same error type, and output a `Fetch` that runs them concurrently. 
