@@ -6,7 +6,7 @@ author:
 - Yihong Zhang
 documentclass: article
 geometry:
-- margin=1in
+- margin=0.75in
 classoption: twocolumn
 ...
 
@@ -108,26 +108,29 @@ Presentely, though ASoul simplifies the concurrency construct, we are leveraging
 
 #### Caching
 In Haxl paper, the authors implemented a cache store for requests, but we did not implement it due to the time constraint. 
-
-# Reference
-
-\newpage
+<!-- # Reference -->
+<!-- \newpage -->
 
 # Appendix
 ## Macros and Interfaces
-#### `fetch!`
+#### `fetch!`.
 Similar to `do` notation in Haskell, `fetch!` simplifies the monadic construction of `Fetch<T>`. The core is `<-`, an infix operator that takes a variable `x` and a `Fetch<T>` and `bind` the data of type `T` wrapped in `Fetch` to `x`, which could be used in future `bind`s.
 
-#### `sequence`
+#### `sequence`.
 `sequence` use an `Iterator` of type `Fetch<T, E>` to construct a `Fetch<Vec<T>, E>`, by folding the iterator and lifting each `Fetch` inside it. 
 
-#### `lift`
-Similar to `join` in async programming, `lift` combines two `Fetch` with the same error type, and output a `Fetch` that runs them concurrently. 
+#### `lift`.
+Similar to `join` in async programming, `lift` combines two `Fetch` with the same error type, and output a `Fetch` that runs them concurrently.
+
+#### `pure`.
+Lifts any value of type `T` to `Fetch<T>`.
+
+#### `map`.
+Similar to `fmap` in Haskell. Lifts a mapping of type `A` to `B` into a morphism from `Fetch<A>` to `Fetch<B>`.
+
+#### `ap`.
+`ap` uncurries `map` and takes a pair of mapping from `A` to `B` and an object with type `Fetch<A>`, returns a result of type `Fetch<B>`.
 
 ## Evaluation Results
-| Run   | x~    | p50     | p90     | p95     | p99     |
-| ----- | ----- | ------- | ------- | ------- | ------- |
-| Original | 414.0 | 433.3 | 434.9  | 435.3   | 437.1   |
-| Async | 25.6  | 25.5    | 25.9    | 26.0    | 34.3    |
-| Asoul | 22.8  | 22.7    | 23.1    | 23.4    | 32.3    |
-
+![](./images/cse453ap1.png)
+As shown in the figure above, the performance of ASoul is comparabily efficient as built-in async library of Rust, but ASoul requires less knowledge from its users about the part of the programs that executes in parallel.
